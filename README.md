@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 65
     steps:
-      - uses: mikelward/codex-review@v1
+      - uses: mikelward/codex-review@main
 ```
 
 Then add `codex` to the required status checks for your default branch. Until
@@ -83,17 +83,47 @@ conversation resolution* setting does that natively, and better.
 The action is the sweep. The workflow around it is a security boundary, and it
 stays where a reviewer of *your* repository can see it.
 
-The job holds `statuses: write`. Several triggers would let a pull request
+The job holds `statuses: write`, and several triggers would let a pull request
 branch supply its own version of the steps that hold that token and publish
-`codex: success` for itself — `workflow_dispatch` takes a ref and GitHub runs
-the workflow file *from that ref*, and plain `pull_request` takes its definition
-from the merge ref. The trigger set above has no such hole: `schedule`,
-`pull_request_target` and both comment events all take the workflow definition
-from the base ref. Pinning the checkout does not help when the branch supplies
-the steps, which is why the fix is the trigger list rather than a `ref:`.
+`codex: success` for itself. `workflow_dispatch` takes a ref and GitHub runs the
+workflow file *from that ref*; plain `pull_request` takes its definition from
+the merge ref. Neither is in the list above, deliberately. Pinning the checkout
+does not help when the branch supplies the steps around it, which is why the fix
+is the trigger list rather than a `ref:`.
 
-Keeping that list in your repository means the declarations that decide who can
-write the status are reviewed alongside your code, not vendored out of sight.
+**Treat the comment events as unverified rather than base-ref-pinned.** GitHub
+documents `issue_comment` and `pull_request_review_comment` as default-branch
+events — `GITHUB_REF` and `GITHUB_SHA` both point at the default branch — which
+would mean a pull request cannot supply the definition through either. Against
+that, a `pull_request_review_comment` in one consuming repository was observed
+starting a run whose recorded workflow path was a file that existed only on the
+pull request's branch, failing on an action reference that appeared nowhere on
+the default branch. Whatever the mechanism, what executed there was not the base
+version.
+
+It does not change what you should do, which is why this is a note rather than
+a warning. **Reaching that route needs a branch in this repository** — a fork
+cannot, because a fork's workflow files are not in your repository for any of
+these events to run — and anyone who can push such a branch can publish the
+status far more simply, with any `on: push` workflow declaring
+`permissions: statuses: write`, which unambiguously runs the branch's own
+definition. So dropping the comment events buys little either way. If you need
+to bind this against collaborators, hold the credential in an environment whose
+deployment-branch policy allows only your default branch; editing the trigger
+list is not that.
+
+Do not read any of this as "fork pull requests get a weak token."
+`pull_request_target` runs in the **base** repository's context and its
+`GITHUB_TOKEN` carries whatever the workflow asks for — `statuses: write`
+here — for fork pull requests as much as for any other. What protects you is
+that the *definition* comes from the base ref, not that the token is small. It
+matters because the two arguments fail differently: if you ever add a step that
+checks out or executes the pull request's code, the base-ref protection is gone
+and the writable token is right there.
+
+Keeping the trigger list in your repository means the declarations that decide
+who can write the status are reviewed alongside your code, not vendored out of
+sight.
 
 Make this sweep the **only** writer of the `codex` status. A second writer is an
 unordered write, and one delayed past this run's exit overwrites a
@@ -101,21 +131,37 @@ just-published `success` with nothing left to notice.
 
 ## Versioning
 
-`@v1` floats, and that is the feature: a fix reaches every consumer without a
-pull request in each one. What replaces a pinned SHA is this repository's own
-CI — the suite gates the tag, and the failure direction is the safe one, since a
-broken sweep leaves `pending`, which blocks merges rather than letting anything
-through.
+There is none: consumers track `@main`, and whatever `main` points at is what
+they run. That is the feature — a fix reaches every consumer without a pull
+request in each one — and pinning a SHA would defend against an action author
+who is someone else, which here is the same account that can already push to
+the consumer's default branch.
 
-`@v1` is a promise about two things a consumer's branch protection depends on:
-the status context stays `codex`, and a caller with no `with:` block keeps
-working. Both are pinned by tests.
+**What a tag would add is a staging step, not a testing one.** Changes reach
+`main` through a pull request like anywhere else, so consumers are not running
+code the suite has never seen. What they do get is every merge, immediately: a
+tag is a second pointer you move on purpose, so a change can land on `main` and
+wait. Without one there is nowhere to wait — no holding a merged change back
+while you think, no publishing several together. If that ever matters, add a
+tag and pay the step on every change; until it does, the merge is the release.
+
+The residual either way: a merge produces a new commit (rebased or squashed)
+that this repository's own `push` run then tests, so for those couple of
+minutes consumers are on a commit whose exact form has been tested as a branch
+rather than as itself. What keeps that boring is the failure direction — a
+broken sweep leaves `pending`, which blocks merges rather than letting anything
+through, so the bad case is a stalled gate that a revert clears, not a forged
+verdict.
+
+Two things consumers' branch protection depends on, which must not change
+without a migration in every consumer: the status context stays `codex`, and a
+caller with no `with:` block keeps working. Both are pinned by tests.
 
 ## No dependencies, on purpose
 
 There is no `package.json`, no lockfile and no build step. The file the runner
-executes is the file in this repository, so a floating tag can be reviewed by
-reading what it runs — nothing is generated in between that could differ from
+executes is the file in this repository, so what consumers run can be reviewed
+by reading it — nothing is generated in between that could differ from
 its source. A test enforces this.
 
 ## License

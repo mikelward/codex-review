@@ -8,8 +8,9 @@ branding:
 
 # No bundling step and no `node_modules`: the sweep has zero dependencies, so
 # the file the runner executes is the file in this repository. That is what
-# makes a floating `@v1` reviewable -- what you read here is what runs, with no
-# build output in between that could differ from its source.
+# makes an unpinned reference reviewable -- consumers track `@main`, and what
+# you read here is what runs, with no build output in between that could differ
+# from its source.
 runs:
   using: 'node24'
   main: 'codex-review.mjs'
