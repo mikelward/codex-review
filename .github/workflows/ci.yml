@@ -1,0 +1,35 @@
+name: CI
+
+# This suite is the whole safety net for a floating `@v1`. Consumers do not
+# pin a SHA -- deliberately, since bumping one in every repository is the cost
+# centralizing was meant to remove -- so nothing else stands between a push
+# here and every consumer's merge gate. A tag only moves over a green run.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Nothing here writes to the repository.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # The major the action manifest declares. They are pinned to each other
+      # by action.test.js, so this cannot quietly test on a runtime the action
+      # does not run on.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      # No install step, because there is nothing to install. If this ever
+      # needs one, action.test.js fails first -- a dependency here would mean
+      # what runs on a consumer's runner is no longer what a reader reads.
+      - name: Test
+        run: node --test *.test.js

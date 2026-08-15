@@ -1,0 +1,51 @@
+name: 'Codex review verdict'
+description: "Republish Codex's review verdict as a commit status branch protection can require."
+author: 'mikelward'
+
+branding:
+  icon: 'check-circle'
+  color: 'green'
+
+# No bundling step and no `node_modules`: the sweep has zero dependencies, so
+# the file the runner executes is the file in this repository. That is what
+# makes a floating `@v1` reviewable -- what you read here is what runs, with no
+# build output in between that could differ from its source.
+runs:
+  using: 'node24'
+  main: 'codex-review.mjs'
+
+inputs:
+  token:
+    description: >-
+      Token used to read pull requests and check suites and to write the
+      `codex` commit status. The default is the workflow's own
+      `GITHUB_TOKEN`, so the calling job grants the scope rather than
+      minting a secret: it needs `statuses: write` plus read on contents,
+      pull-requests and checks.
+    required: false
+    default: ${{ github.token }}
+  repository:
+    description: >-
+      The `owner/name` to sweep. Defaults to the repository the workflow is
+      running in, which is what every ordinary caller wants; it is an input
+      only so the sweep can be pointed elsewhere by hand when debugging.
+    required: false
+    default: ${{ github.repository }}
+  loop-minutes:
+    description: >-
+      How long one run keeps sweeping. The job is the clock, not the
+      schedule -- GitHub throttles a `*/5` cron to a measured 14-minute
+      median, so a run polls for most of an hour and the schedule only has
+      to keep a run alive. `0` sweeps exactly once, which is what a manual
+      invocation wants. Keep the caller's `timeout-minutes` above this.
+    required: false
+    default: '55'
+  interval-seconds:
+    description: >-
+      Seconds between sweeps within a run. A sweep is a handful of API
+      calls, so 60 keeps even a full-length run to a few hundred requests
+      against `GITHUB_TOKEN`'s 1,000/hour. Raise this rather than shortening
+      the loop if a repository ever has dozens of pull requests open at
+      once.
+    required: false
+    default: '60'
