@@ -366,8 +366,11 @@ query($owner:String!, $name:String!, $after:String) {
         isCrossRepository
         updatedAt
         commits(last:1) { nodes { commit { committedDate } } }
-        timelineItems(itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT], last:1) {
+        forcePushes: timelineItems(itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT], last:10) {
           nodes { ... on HeadRefForcePushedEvent { createdAt } }
+        }
+        retargets: timelineItems(itemTypes:[BASE_REF_CHANGED_EVENT], last:10) {
+          nodes { ... on BaseRefChangedEvent { createdAt } }
         }
         reactions(first:100) { ${PAGE} nodes { content createdAt user { login } } }
       }
@@ -689,7 +692,46 @@ export async function sweep({
     // is the silent merge of a commit nobody reviewed. No record GitHub
     // keeps is guaranteed to precede a fast-forward arrival, so there is
     // no sound earlier floor to prefer.
-    const movedAt = utc(node.timelineItems?.nodes?.[0]?.createdAt);
+    //
+    // A RETARGET is the same problem reached from the other side, and Codex
+    // does not answer it at all: it revokes its 👍 when a commit lands and on
+    // nothing else, so a base change leaves the reaction standing while the
+    // diff underneath it becomes a different one. That is the moment the
+    // verdict actually starts being consumed, too — a stacked pull request
+    // approved against its small-diff parent is retargeted onto the default
+    // branch precisely when it is ready to merge. `BaseRefChangedEvent` is
+    // server-stamped like the force-push event, so it floors the VERDICT the
+    // same way, and a 👍 older than the retarget reads stale until a nudge or
+    // a push produces a fresh one.
+    //
+    // The two floors are NOT interchangeable, and collapsing them into one
+    // was a bug: a retarget moves the base, not the head, so it says nothing
+    // about when the commit reached its branch. Flooring the check-suite
+    // lookup at a retarget discards the head's own legitimate branch suites,
+    // `forBranch` comes back null, and the head reads undatable — so the
+    // fresh 👍 earned by the `@codex review` that follows the retarget is
+    // rejected too, and the gate sticks at pending with no way out. So the
+    // retarget floors what the verdict is measured against (reactions,
+    // comments) and the force-push alone floors the birth records that date
+    // the head's arrival.
+    //
+    // Each kind is its OWN bounded connection rather than one mixed page,
+    // because a mixed page is lossy in the fail-open direction: a bound of
+    // ten covers ten *events*, so a run of retargets can evict the last
+    // force-push from it, `forcePushedAt` reads null, and the suite floor
+    // that keeps a recycled commit's previous life out silently disappears.
+    // Separate aliases mean neither kind can crowd out the other.
+    //
+    // Within a page the floor is the LATEST node rather than the first:
+    // GitHub returns a connection oldest-first, so `[0]` of `last:10` is the
+    // tenth-most-recent movement, not the most recent one.
+    const latestOf = (connection) => (connection?.nodes ?? [])
+      .map((n) => utc(n?.createdAt))
+      .filter(Boolean)
+      .reduce((latest, at) => (latest === null || at > latest ? at : latest), null);
+    const forcePushedAt = latestOf(node.forcePushes);
+    const retargetedAt = latestOf(node.retargets);
+    const movedAt = laterOf(forcePushedAt, retargetedAt);
     let bound = laterOf(firstSeen, movedAt);
     // Don't read reactions when the shared head has already decided.
     let seen = sharedHead
@@ -708,7 +750,7 @@ export async function sweep({
     let births = null;
     if (!sharedHead && (seen.approved || seen.staleApproval)) {
       births = await checkSuiteBirths(api, {
-        owner, name, sha: node.headRefOid, branch: node.headRefName, since: movedAt,
+        owner, name, sha: node.headRefOid, branch: node.headRefName, since: forcePushedAt,
       });
       // A same-repo head always earns a suite on its own branch within
       // seconds — this workflow's own pull_request_target run creates one
@@ -746,9 +788,11 @@ export async function sweep({
       // The rescue: a 👍 rejected purely for freshness may be genuine, with
       // the head merely dated too late by a slow external status. An
       // earlier birth record — the earliest suite, floored at both the
-      // force-push event and the branch-born suite so a recycled commit's
-      // old records cannot resurrect a previous life's approval — can lower
-      // the bound and revive it. An undatable head gets no rescue: lowering
+      // head-moved time and the branch-born suite so neither a recycled
+      // commit's old records nor a pre-retarget 👍 can resurrect an approval
+      // of different work — can lower the bound and revive it. Note that
+      // `movedAt` rather than `forcePushedAt` is the floor here: this is the
+      // verdict's bound, so a retarget holds it up. An undatable head gets no rescue: lowering
       // its bound with a foreign branch's suite is the same hole again.
       if (!undatable && !seen.approved && seen.staleApproval) {
         const better = laterOf(
@@ -809,6 +853,34 @@ export async function sweep({
       // the ask settles it.
       nudged = Boolean(nudgeAt) && (answeredAt === null || nudgeAt >= answeredAt);
       findings = !approved && Boolean(answeredAt) && !nudged;
+      // A retarget's floor is a timestamp, and a timestamp alone cannot tell
+      // a fresh answer from the old one landing late. Codex answers minutes
+      // after it starts, so a base changed mid-read yields a 👍 stamped after
+      // the retarget that nonetheless describes the diff before it — and the
+      // floor waves it through, republishing success for work Codex never saw
+      // against this base. Every other floor here dates the head's ARRIVAL,
+      // where postdating really does prove freshness; this one dates a change
+      // to the other side of the diff, which Codex is not watching at all.
+      //
+      // So a retarget needs evidence rather than a timestamp: something that
+      // demonstrably restarts the review. A head that ARRIVED after it is one
+      // — Codex revokes on a landing commit and re-reads, so a 👍 on a head
+      // newer than the retarget answers the new base. That arrival is not the
+      // force-push event alone: an ordinary push emits `synchronize` and no
+      // timeline event at all, so keying on force-pushes would hold a
+      // re-reviewed head hostage to a nudge nobody needs to send. The
+      // branch-born suite is the arrival record that covers both, and it is
+      // already in hand — a 👍 in play is exactly when it was fetched. The
+      // other evidence is a nudge, and the comment walk is already floored at
+      // `movedAt`, so any `nudgeAt` in hand postdates the retarget by
+      // construction. Absent either, the head waits — the same pending an
+      // owner clears with one `@codex review`. It rides the existing `nudged`
+      // flag because it is the same state by another route: an answer is due
+      // again.
+      const arrivedAt = laterOf(forcePushedAt, births?.forBranch);
+      const retargetLast = retargetedAt
+        && !(arrivedAt && arrivedAt > retargetedAt);
+      if (retargetLast && !nudgeAt) nudged = true;
     }
     const verdict = verdictFor({
       isDraft: false, approved, sharedHead, held, reading, findings, nudged,
@@ -854,7 +926,7 @@ export async function sweep({
     // on the branch-born suite — the arrival's own record.
     if (births === null && node.headRefName) {
       births = await checkSuiteBirths(api, {
-        owner, name, sha: node.headRefOid, branch: node.headRefName, since: movedAt,
+        owner, name, sha: node.headRefOid, branch: node.headRefName, since: forcePushedAt,
       });
     }
     waitedSince = laterOf(waitedSince, births?.forBranch);

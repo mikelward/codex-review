@@ -376,6 +376,12 @@ const review = (commit_id = "abc1234", login = `${CODEX_BOT}[bot]`, submitted_at
   submitted_at,
 });
 
+// The two timeline connections the sweep floors on. They are separate
+// aliases rather than one mixed page: only the force-push dates the head's
+// arrival on its branch, and a mixed page lets one kind evict the other.
+const forcePushes = (...ts) => ({ nodes: ts.map((createdAt) => ({ createdAt })) });
+const retargets = (...ts) => ({ nodes: ts.map((createdAt) => ({ createdAt })) });
+
 const thumbs = (login = `${CODEX_BOT}[bot]`, createdAt = AFTER) => ({
   content: "THUMBS_UP",
   createdAt,
@@ -831,13 +837,176 @@ describe("sweep", () => {
       statuses: { abc1234: [{ context: "Vercel", state: "success", created_at: era }] },
       checkSuites: { abc1234: [{ created_at: era, head_branch: "claude/topic" }] },
       graphqlResponses: [repoPRs([prNode({
-        timelineItems: { nodes: [{ createdAt: "2026-08-14T12:00:00Z" }] },
+        forcePushes: forcePushes("2026-08-14T12:00:00Z"),
         reactions: page([thumbs(undefined, "2026-08-10T09:05:00Z")]),
       })])],
     });
     const out = await runFull(fake);
     expect(out.awaiting).toBe(1);
     expect(out.written[0].state).toBe("pending");
+  });
+
+  it("stales a 👍 earned before the pull request was retargeted", async () => {
+    // Codex revokes its 👍 when a commit lands and on nothing else, so a
+    // base change leaves the reaction standing over a diff that is no
+    // longer the one it read. The retarget is server-stamped, so it floors
+    // the verdict the way a force-push does.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate("2026-08-14T11:00:00Z")] },
+      checkSuites: { abc1234: [bornSuite("2026-08-14T10:59:00Z")] },
+      graphqlResponses: [repoPRs([prNode({
+        retargets: retargets("2026-08-14T12:00:00Z"),
+        reactions: page([thumbs(undefined, "2026-08-14T11:05:00Z")]),
+      })])],
+    });
+    const out = await runFull(fake);
+    expect(out.awaiting).toBe(1);
+    // The head already carries `pending`, so the identical write is skipped;
+    // what this asserts is that the stale 👍 did not flip it to success.
+    expect(out.written).toEqual([]);
+  });
+
+  it("approves a re-reviewed 👍 after a retarget the head's suites predate", async () => {
+    // The retarget floors the VERDICT, not the birth records. A retarget
+    // moves the base and leaves the head where it was, so the branch suite
+    // that dates its arrival is necessarily older than the retarget —
+    // flooring the suite lookup there too would discard it, read the head
+    // as undatable, and reject the very 👍 the follow-up `@codex review`
+    // just earned, sticking the gate at pending with no way out.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate("2026-08-14T11:00:00Z")] },
+      checkSuites: { abc1234: [bornSuite("2026-08-14T10:59:00Z")] },
+      issueComments: { 1: [{
+        user: { login: OWNER },
+        created_at: "2026-08-14T12:01:00Z",
+        body: "@codex review",
+      }] },
+      graphqlResponses: [repoPRs([prNode({
+        retargets: retargets("2026-08-14T12:00:00Z"),
+        reactions: page([thumbs(undefined, "2026-08-14T12:05:00Z")]),
+      })])],
+    });
+    const out = await runFull(fake);
+    expect(out.written[0].state).toBe("success");
+  });
+
+  it("holds a post-retarget 👍 that no re-review was asked for", async () => {
+    // Codex answers minutes after it starts, so a base changed mid-read
+    // yields a 👍 stamped AFTER the retarget that still describes the diff
+    // before it. A timestamp floor cannot tell the two apart, and a
+    // retarget does not restart Codex — so without a nudge or a push to
+    // prove the review was redone, the head waits.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate("2026-08-14T11:00:00Z")] },
+      checkSuites: { abc1234: [bornSuite("2026-08-14T10:59:00Z")] },
+      graphqlResponses: [repoPRs([prNode({
+        retargets: retargets("2026-08-14T12:00:00Z"),
+        reactions: page([thumbs(undefined, "2026-08-14T12:05:00Z")]),
+      })])],
+    });
+    const out = await runFull(fake);
+    expect(out.awaiting).toBe(1);
+    expect(out.written).toEqual([]);
+  });
+
+  it("lets an ordinary push after a retarget settle the verdict", async () => {
+    // An ordinary push emits `synchronize` and NO timeline event, so keying
+    // the hold on force-pushes alone would hold a head Codex has already
+    // re-read hostage to a nudge nobody needs to send. The branch-born
+    // suite is the arrival record that covers a plain push too.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate("2026-08-14T11:00:00Z")] },
+      checkSuites: { abc1234: [bornSuite("2026-08-14T12:05:00Z")] },
+      graphqlResponses: [repoPRs([prNode({
+        retargets: retargets("2026-08-14T12:00:00Z"),
+        reactions: page([thumbs(undefined, "2026-08-14T12:10:00Z")]),
+      })])],
+    });
+    const out = await runFull(fake);
+    expect(out.written[0].state).toBe("success");
+  });
+
+  it("holds when the arrival and the retarget are stamped in the same second", async () => {
+    // GitHub stamps to the second, so a tie is an unresolved ordering — and
+    // the ambiguity must not be what opens the gate.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate("2026-08-14T11:00:00Z")] },
+      checkSuites: { abc1234: [bornSuite("2026-08-14T12:00:00Z")] },
+      graphqlResponses: [repoPRs([prNode({
+        retargets: retargets("2026-08-14T12:00:00Z"),
+        reactions: page([thumbs(undefined, "2026-08-14T12:10:00Z")]),
+      })])],
+    });
+    const out = await runFull(fake);
+    expect(out.awaiting).toBe(1);
+    expect(out.written).toEqual([]);
+  });
+
+  it("lets a push after a retarget settle the verdict on its own", async () => {
+    // The other evidence a review was redone: a force-push moves the head,
+    // Codex re-reads it, and the force-push floor is then the later
+    // movement — so no nudge is needed and the fresh 👍 stands.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate("2026-08-14T12:10:00Z")] },
+      checkSuites: { abc1234: [bornSuite("2026-08-14T12:10:30Z")] },
+      graphqlResponses: [repoPRs([prNode({
+        retargets: retargets("2026-08-14T12:00:00Z"),
+        forcePushes: forcePushes("2026-08-14T12:09:00Z"),
+        reactions: page([thumbs(undefined, "2026-08-14T12:15:00Z")]),
+      })])],
+    });
+    const out = await runFull(fake);
+    expect(out.written[0].state).toBe("success");
+  });
+
+  it("floors the verdict on the later of a force-push and a retarget", async () => {
+    // Each floor is the latest of its OWN kind: here the retarget is the
+    // later event, and a 👍 between the two belongs to the pre-retarget
+    // diff. The force-push still dates the head, so the suite is admitted
+    // and the head is datable — this rejects on freshness alone.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate("2026-08-14T11:00:00Z")] },
+      checkSuites: { abc1234: [bornSuite("2026-08-14T11:30:00Z")] },
+      graphqlResponses: [repoPRs([prNode({
+        retargets: retargets("2026-08-14T12:00:00Z"),
+        forcePushes: forcePushes("2026-08-14T11:29:00Z"),
+        reactions: page([thumbs(undefined, "2026-08-14T11:45:00Z")]),
+      })])],
+    });
+    const out = await runFull(fake);
+    expect(out.awaiting).toBe(1);
+    expect(out.written).toEqual([]);
+  });
+
+  it("takes the newest node in a movement page, not the first", async () => {
+    // A connection comes back oldest-first, so `[0]` of a bounded page is
+    // the OLDEST movement it carries. Flooring there would admit a
+    // previous life's suites: here only the 12:00 force-push keeps the
+    // stale 10:00 suite out, and the 👍 that predates the re-arrival with
+    // it.
+    const fake = fakeFetch({
+      statuses: { abc1234: [{ context: "Vercel", state: "success", created_at: "2026-08-14T10:05:00Z" }] },
+      checkSuites: { abc1234: [bornSuite("2026-08-14T10:00:00Z")] },
+      graphqlResponses: [repoPRs([prNode({
+        forcePushes: forcePushes("2026-08-14T09:00:00Z", "2026-08-14T12:00:00Z"),
+        reactions: page([thumbs(undefined, "2026-08-14T10:10:00Z")]),
+      })])],
+    });
+    const out = await runFull(fake);
+    expect(out.awaiting).toBe(1);
+    expect(out.written[0].state).toBe("pending");
+  });
+
+  it("asks for each movement kind in its own bounded connection", async () => {
+    // One mixed page is lossy in the fail-open direction: its bound counts
+    // events, not events-per-kind, so a run of retargets can evict the last
+    // force-push, `forcePushedAt` reads null, and the suite floor that
+    // keeps a recycled commit's previous life out disappears silently.
+    const fake = fakeFetch({ graphqlResponses: [repoPRs([prNode()])] });
+    await runFull(fake);
+    const query = fake.calls.find((c) => c.path.includes("/graphql")).body.query;
+    expect(query).toMatch(/forcePushes:\s*timelineItems\(itemTypes:\[HEAD_REF_FORCE_PUSHED_EVENT\]/);
+    expect(query).toMatch(/retargets:\s*timelineItems\(itemTypes:\[BASE_REF_CHANGED_EVENT\]/);
   });
 
   it("rescues a 👍 dated too late only by a slow external status", async () => {
@@ -1326,7 +1495,7 @@ describe("sweep", () => {
         { created_at: "2026-08-14T12:20:00Z", head_branch: "claude/topic" },
       ] },
       graphqlResponses: [repoPRs([prNode({
-        timelineItems: { nodes: [{ createdAt: "2026-08-14T12:00:00Z" }] },
+        forcePushes: forcePushes("2026-08-14T12:00:00Z"),
         reactions: page([thumbs(undefined, "2026-08-14T12:10:00Z")]),
       })])],
     });

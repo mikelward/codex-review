@@ -26,7 +26,11 @@ on:
   schedule:
     - cron: '23 * * * *'
   pull_request_target:
-    types: [opened, reopened, ready_for_review, synchronize, closed]
+    # `edited` carries a retarget. Codex revokes its 👍 when a commit lands
+    # and on nothing else, so a base change leaves the reaction standing over
+    # a diff it never read — and a retarget is exactly when a stacked pull
+    # request's verdict starts being consumed against the default branch.
+    types: [opened, reopened, ready_for_review, synchronize, closed, edited]
   issue_comment:
     types: [created, edited]
   pull_request_review_comment:
@@ -148,6 +152,17 @@ webhook, so nothing can notice one as it lands. **To stop a merge right now,
 convert the pull request to a draft:** GitHub disables auto-merge on drafts the
 moment you do, and this action returns no verdict for a draft, so nothing here
 fights you.
+
+**A retarget invalidates the verdict, and only a re-review restores it.**
+Codex revokes its 👍 when a commit lands and on nothing else, so changing the
+base leaves the reaction standing over a diff it never read — which is exactly
+when the verdict starts being consumed, since a stacked pull request is
+retargeted onto the default branch when it is ready to merge. Every other
+floor here is a timestamp, but a timestamp cannot settle this one: Codex
+answers minutes after it starts, so a base changed mid-read produces a 👍
+stamped *after* the retarget that still describes the diff before it. So a
+retarget asks for evidence instead — a push, or an `@codex review`. Until one
+of those arrives the head reads `pending`, and one comment clears it.
 
 Human review threads are deliberately not modeled. GitHub's *require
 conversation resolution* setting does that natively, and better.
@@ -348,6 +363,17 @@ verdict.
 Two things consumers' branch protection depends on, which must not change
 without a migration in every consumer: the status context stays `codex`, and a
 caller with no `with:` block keeps working. Both are pinned by tests.
+
+**`@main` carries the action, not the workflow.** The `on:` list, the
+permissions and the concurrency group live in each consumer's own file — that is
+[the point](#why-the-workflow-lives-in-your-repo) — so a change to the template
+above reaches nobody by itself. It is a migration to run in every consumer, and
+the only kind of change here that needs one. The failure is quiet, because a
+consumer missing a trigger is not wrong, only late: the sweep still runs on its
+schedule and still judges by the new rules, so the exposure is bounded by the
+hourly cron rather than open-ended. Quiet and bounded is still a window, so when
+the template's triggers change, open the consumer pull requests in the same
+sitting and name any consumer still on the old list.
 
 ## No dependencies, on purpose
 

@@ -9,7 +9,11 @@ on:
   schedule:
     - cron: '23 * * * *'
   pull_request_target:
-    types: [opened, reopened, ready_for_review, synchronize, closed]
+    # `edited` carries a retarget. Codex revokes its 👍 when a commit lands
+    # and on nothing else, so a base change leaves the reaction standing over
+    # a diff it never read — and a retarget is exactly when a stacked pull
+    # request's verdict starts being consumed against the default branch.
+    types: [opened, reopened, ready_for_review, synchronize, closed, edited]
   issue_comment:
     types: [created, edited]
   pull_request_review_comment:

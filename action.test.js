@@ -194,7 +194,10 @@ describe("action.yml", () => {
     const on = sweep.match(/^on:\n([\s\S]*?)\n\npermissions:/m)?.[1];
     expect(typeof on).toBe("string");
     expect(on).toMatch(/schedule:\n\s+- cron: '23 \* \* \* \*'/);
-    expect(on).toMatch(/pull_request_target:\n\s+types: \[opened, reopened, ready_for_review, synchronize, closed\]/);
+    // `edited` carries a retarget, which Codex answers with nothing: it
+    // revokes its 👍 on a landing commit and on no other event, so without
+    // this the reaction stands over a diff it never read.
+    expect(on).toMatch(/pull_request_target:\n(?:\s+#[^\n]*\n)*\s+types: \[opened, reopened, ready_for_review, synchronize, closed, edited\]/);
     expect(on).toMatch(/issue_comment:\n\s+types: \[created, edited\]/);
     expect(on).toMatch(/pull_request_review_comment:\n\s+types: \[created, edited\]/);
     expect(on).toMatch(/workflow_run:\n\s+workflows: \[codex-review-listener\]\n\s+types: \[completed\]/);
