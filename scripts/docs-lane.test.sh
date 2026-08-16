@@ -93,8 +93,16 @@ case "$*" in
   *".changed_files"*)
     if [ -n "${CHANGED:-}" ]; then echo "$CHANGED"; else echo $FILES | wc -w; fi
     ;;
-  *".commits"*)
-    if [ -n "${NCOMMITS:-}" ]; then echo "$NCOMMITS"; else printf '%s' "$SUBJECTS" | grep -c .; fi
+  *"[.commits, .title]"*)
+    # One read, two fields — the count (or NCOMMITS override) and the title,
+    # tab-separated in that order, matching what lint_prefixes asks for.
+    if [ -n "${NCOMMITS:-}" ]; then n="$NCOMMITS"; else n=$(printf '%s' "$SUBJECTS" | grep -c .); fi
+    printf '%s\t%s\n' "$n" "${TITLE-docs: A pull request}"
+    ;;
+  *".title"*)
+    # The settlement re-read. TITLE2 answers it when a fixture wants the
+    # title to change after lint_prefixes judged it; otherwise it agrees.
+    echo "${TITLE2-${TITLE-docs: A pull request}}"
     ;;
 esac
 EOF
@@ -177,6 +185,12 @@ check "merge commits are exempt"          0 "" FILES="AGENTS.md" SUBJECTS="2:Mer
 check "a fake merge subject is not exempt" 1 "lacks a housekeeping prefix" FILES="AGENTS.md" SUBJECTS="Merge installation sections" CLASSIFY=success RESULTS="$ALLSKIP"
 check "bare subject fails the lane"       1 "lacks a housekeeping prefix" FILES="AGENTS.md" SUBJECTS="Fix a typo" CLASSIFY=success RESULTS="$ALLSKIP"
 check "a prefix outside the table fails"  1 "lacks a housekeeping prefix" FILES="AGENTS.md" SUBJECTS="internal: tidy" CLASSIFY=success RESULTS="$ALLSKIP"
+check "a bare PR title fails the lane"    1 "title lacks a housekeeping prefix" FILES="AGENTS.md" SUBJECTS="docs: x" CLASSIFY=success RESULTS="$ALLSKIP" TITLE="Rewrite the setup guide"
+check "a mis-prefixed PR title fails"     1 "title lacks a housekeeping prefix" FILES="AGENTS.md" SUBJECTS="docs: x" CLASSIFY=success RESULTS="$ALLSKIP" TITLE="internal: tidy"
+check "an empty PR title is refused"      1 "no title to check" FILES="AGENTS.md" SUBJECTS="docs: x" CLASSIFY=success RESULTS="$ALLSKIP" TITLE=""
+check "a prefixed PR title rides the lane" 0 "" FILES="AGENTS.md" SUBJECTS="docs: x" CLASSIFY=success RESULTS="$ALLSKIP" TITLE="docs: Rewrite the setup guide"
+check "a title gone bare after the lint is refused" 1 "moved while the gate was reading" FILES="AGENTS.md" SUBJECTS="docs: x" CLASSIFY=success RESULTS="$ALLSKIP" TITLE2="Rewrite the setup guide"
+check "a benign retitle after the lint still passes" 0 "" FILES="AGENTS.md" SUBJECTS="docs: x" CLASSIFY=success RESULTS="$ALLSKIP" TITLE2="docs: A better name"
 check "a dispatched skip still lints"     1 "lacks a housekeeping prefix" FILES="AGENTS.md" SUBJECTS="Fix a typo" CLASSIFY=success RESULTS="$ALLSKIP" GITHUB_EVENT_NAME=workflow_dispatch
 check "gate refuses a mis-bound dispatch"  1 "must not label" FILES="AGENTS.md" SUBJECTS="docs: x" CLASSIFY=success RESULTS="$ALLSKIP" GITHUB_EVENT_NAME=workflow_dispatch HEAD_SHA=otherhead
 check "gate refuses a shared head"         1 "cannot vouch for exactly one" FILES="AGENTS.md" SUBJECTS="docs: x" CLASSIFY=success RESULTS="$ALLSKIP" GITHUB_EVENT_NAME=workflow_dispatch SHARED_PRS="1 2"
@@ -195,6 +209,11 @@ check "green results from an outlived run are refused" 1 "own run owns the verdi
 check "green results from a retargeted run are refused" 1 "own run owns the verdict" FILES="a.mjs" CLASSIFY=success RESULTS="$ALLOK" BASE_REF=other
 check "green results on a shared head are refused" 1 "cannot vouch for exactly one" FILES="a.mjs" CLASSIFY=success RESULTS="$ALLOK" SHARED_PRS="1 2"
 check "a push run's green gate reports"   0 "" FILES="a.mjs" CLASSIFY=success RESULTS="$ALLOK" GITHUB_EVENT_NAME=push
+check "a dispatched green gate settles too"  1 "moved while the gate was reading" FILES="a.mjs" CLASSIFY=success RESULTS="$ALLOK" GITHUB_EVENT_NAME=workflow_dispatch BASE_AFTER=2
+check "a dispatched green gate reports when settled" 0 "" FILES="a.mjs" CLASSIFY=success RESULTS="$ALLOK" GITHUB_EVENT_NAME=workflow_dispatch
+check "green results after a late retarget are refused" 1 "moved while the gate was reading" FILES="a.mjs" CLASSIFY=success RESULTS="$ALLOK" BASE_AFTER=2
+check "green results after a late force-push are refused" 1 "moved while the gate was reading" FILES="a.mjs" CLASSIFY=success RESULTS="$ALLOK" HEAD_AFTER=2
+check "green results after a late twin PR are refused" 1 "moved while the gate was reading" FILES="a.mjs" CLASSIFY=success RESULTS="$ALLOK" PULLS_AFTER=2
 check "skip on a README change is refused" 1 "refusing the skip" FILES="README.md" SUBJECTS="docs: x" CLASSIFY=success RESULTS="$ALLSKIP"
 check "skip on a truncated list refused"  1 "refusing the skip" FILES="AGENTS.md" CHANGED=3000 SUBJECTS="docs: x" CLASSIFY=success RESULTS="$ALLSKIP"
 check "commits API failure fails lint"    1 "cannot be verified" FILES="AGENTS.md" COMMITS_FAIL=1 CLASSIFY=success RESULTS="$ALLSKIP"

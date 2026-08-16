@@ -65,6 +65,10 @@ dispatch_without_pr_ok() {
 PINNED_HEAD=""
 PINNED_BASE=""
 PINNED_BASE_SHA=""
+# Set by lint_prefixes once it has judged a title, so still_pinned knows
+# there is one to re-validate. Empty on the all-green path, where no title
+# is read and none needs settling.
+PINNED_TITLE=""
 
 # The live tip of branch $1 — read from the ref itself, not from the PR
 # object, so the answer does not depend on how fresh the PR's cached base
@@ -91,6 +95,16 @@ still_pinned() {
     now=$(base_tip "$PINNED_BASE") || return 2
     if [ "$now" != "$PINNED_BASE_SHA" ]; then return 1; fi
   fi
+  # The title is judged by lint_prefixes and can be edited after that read;
+  # `edited` starts a fresh run but cancels nothing, so this run must not
+  # publish a skip for a title that no longer passes. Re-VALIDATED rather
+  # than compared: a benign retitle (`docs: A` to `docs: B`) leaves the
+  # squash subject just as honest, and reddening a correct run for it would
+  # be a false alarm with nothing behind it.
+  if [ -n "$PINNED_TITLE" ]; then
+    now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq '.title') || return 2
+    has_lane_prefix "$now" || return 1
+  fi
   # The association is as movable as the head: a twin PR opened on the same
   # commit after the earlier sole-open-PR check would inherit this
   # per-commit gate, so that condition is re-verified at settlement too.
@@ -113,7 +127,7 @@ verify_event_binding() {
     echo "::error::A pull_request gate cannot verify its event without the PR number."
     return 1
   fi
-  local head now
+  local head now prbase
   head=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq '.head.sha') || {
     echo "::error::Could not read the pull request's head — refusing to report."
     return 1
@@ -122,10 +136,11 @@ verify_event_binding() {
     echo "::error::The pull request's head moved after this run's event — the replacement head's own run owns the verdict."
     return 1
   fi
-  now=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq '.base.ref') || {
+  prbase=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq '.base.ref') || {
     echo "::error::Could not read the pull request's base — refusing to report."
     return 1
   }
+  now="$prbase"
   if [ -n "${EVENT_BASE_REF:-}" ] && [ "$now" != "$EVENT_BASE_REF" ]; then
     echo "::error::The pull request was retargeted after this run's event — the new diff's own run owns the verdict."
     return 1
@@ -156,6 +171,18 @@ verify_event_binding() {
   if [ "$(printf '%s' "$heads" | grep -c .)" -ne 1 ] || [ "$(printf '%s' "$heads" | head -n1)" != "$PR" ]; then
     echo "::error::Commit ${head} heads these open pull requests: $(printf '%s' "$heads" | tr '\n' ' ')— a per-commit gate cannot vouch for exactly one, so this run refuses to report."
     return 1
+  fi
+  # Record what was just verified so the all-green path can settle it. The
+  # checks above span three API calls, and a retarget landing between the
+  # base read and the association read is verified against a base nobody
+  # looked at again — the same window the docs path closes with its
+  # post-lint recheck. docs_only sets these to the identical values when it
+  # runs; on the all-green path it never runs at all, which is why they are
+  # set here.
+  PINNED_HEAD="$head"
+  PINNED_BASE="$prbase"
+  if [ "$PINNED_BASE" != "${DEFAULT_BRANCH:-main}" ] && [ -n "${EVENT_BASE_SHA:-}" ]; then
+    PINNED_BASE_SHA="$EVENT_BASE_SHA"
   fi
 }
 
@@ -303,15 +330,34 @@ docs_only() {
 # commits listing that cannot be completed fails the lint — an unverified
 # prefix is not a verified one.
 lint_prefixes() {
-  local declared subjects listed bad=0 subject
+  local declared subjects listed bad=0 subject meta title
   # Same reconciliation as pr_files, for the same reason: the commits
   # endpoint stops at 250 commits and exits cleanly, so an unprefixed
   # subject past the cap would simply never be seen. The PR's own commit
   # count says how many there are supposed to be.
-  declared=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq '.commits') || {
-    echo "::error::Could not read the pull request's commit count — the prefix rule cannot be verified."
+  #
+  # The title rides along in the same read because it is a subject too:
+  # under a squash merge it BECOMES the subject that lands on the default
+  # branch, so linting only the commits leaves the one line a squash
+  # actually ships unchecked. Title last in the TSV so a tab inside it
+  # lands in the remainder rather than shifting the fields.
+  meta=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq '[.commits, .title] | @tsv') || {
+    echo "::error::Could not read the pull request's commit count and title — the prefix rule cannot be verified."
     return 1
   }
+  IFS=$'\t' read -r declared title <<< "$meta"
+  if [ -z "$title" ]; then
+    echo "::error::The pull request has no title to check — the prefix rule cannot be verified."
+    return 1
+  fi
+  # No merge-commit exemption here: a title is authored, never generated.
+  if ! has_lane_prefix "$title"; then
+    echo "::error::Docs-lane pull request title lacks a housekeeping prefix:" \
+         "'${title}' — prefix it ($(printf '%s:/' $LANE_PREFIXES | sed 's,/$,,'))" \
+         "so a squash merge cannot land it as a behavior-change subject."
+    bad=1
+  fi
+  PINNED_TITLE="$title"
   # Parent count travels with each subject so merge commits are identified
   # structurally — a docs commit whose subject merely starts with "Merge "
   # is not a merge commit and gets no exemption.
@@ -387,6 +433,23 @@ verify_dispatch_binding() {
     echo "::error::Commit ${GITHUB_SHA} heads these open pull requests: $(printf '%s' "$heads" | tr '\n' ' ')— a per-commit gate cannot vouch for exactly one, so a dispatched run refuses to report."
     return 1
   fi
+  # Record the snapshot for the same reason verify_event_binding does: the
+  # all-green path settles against these pins, and a dispatched run reaches
+  # it too (the weekly dependency job's own CI run is exactly that). Without
+  # them a dispatch with green results skipped settlement entirely, so a
+  # retarget, force-push or twin PR landing after the checks above would
+  # still be labeled by this run.
+  PINNED_HEAD="${GITHUB_SHA}"
+  PINNED_BASE=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq '.base.ref') || {
+    echo "::error::Could not read PR #${PR}'s base — refusing to report for it."
+    return 1
+  }
+  if [ "$PINNED_BASE" != "${DEFAULT_BRANCH:-main}" ]; then
+    PINNED_BASE_SHA=$(base_tip "$PINNED_BASE") || {
+      echo "::error::Could not read the base branch's tip — refusing to report."
+      return 1
+    }
+  fi
 }
 
 case "${1:?usage: docs-lane.sh classify|gate}" in
@@ -417,6 +480,18 @@ case "${1:?usage: docs-lane.sh classify|gate}" in
       esac
     done
     if [ "$all_success" = true ]; then
+      # The heavy jobs vouch for this run's merge snapshot, and the binding
+      # above proved that snapshot was still the PR's — but across three
+      # separate reads. A retarget landing inside that window is verified
+      # against a base nobody re-read, and nothing cancels this run, so its
+      # stale green can overwrite the replacement's verdict on the same
+      # commit. Same settlement the docs path takes after its own later
+      # reads. (No pin means no PR to settle: a push run's gate reports on
+      # a branch, where there is no head/base pair to move.)
+      if [ -n "$PINNED_HEAD" ] && ! still_pinned; then
+        echo "::error::The pull request moved while the gate was reading it — refusing to report."
+        exit 1
+      fi
       exit 0
     fi
     if [ "$all_skipped" = true ]; then

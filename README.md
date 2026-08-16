@@ -223,8 +223,9 @@ these events to run — and anyone who can push such a branch can publish the
 status far more simply, with any `on: push` workflow declaring
 `permissions: statuses: write`, which unambiguously runs the branch's own
 definition. So dropping the comment events buys little either way. If you need
-to bind this against collaborators, hold the credential in an environment whose
-deployment-branch policy allows only your default branch; editing the trigger
+to bind this against collaborators, the fix is a credential held out of their
+reach — see [Binding the status against
+collaborators](#binding-the-status-against-collaborators); editing the trigger
 list is not that.
 
 Do not read any of this as "fork pull requests get a weak token."
@@ -243,6 +244,82 @@ sight.
 Make this sweep the **only** writer of the `codex` status. A second writer is an
 unordered write, and one delayed past this run's exit overwrites a
 just-published `success` with nothing left to notice.
+
+## Binding the status against collaborators
+
+Everything above prices in one assumption: anyone with push access to your
+repository can already publish the `codex` status, because workflow
+permissions live in branch-editable files — any branch can add an `on: push`
+workflow granting itself `statuses: write` and publish `codex: success`
+directly. While the only writer is the repository owner, that is not a hole:
+the gate exists to stop accidents (auto-merge firing before the review
+lands), not to defend the owner against themselves. Fork contributors were
+never inside this line — their runs hold a read-only token whatever the YAML
+declares.
+
+The assumption breaks the day someone gains push access whose merges should
+not be self-approvable. No edit to any workflow file restores the boundary,
+because the forgery route is a workflow the collaborator adds themselves.
+What restores it is making the verdict something only a credential can
+publish, and holding that credential where branch code can never reach it:
+
+1. **Create a GitHub App** that you alone administer, with commit statuses
+   read-and-write as its only repository permission, and install it on the
+   repository. The App is the publisher's identity: statuses minted with its
+   installation token are attributed to the App, while `GITHUB_TOKEN`
+   statuses are attributed to GitHub Actions — no grant a collaborator's
+   workflow gives itself can change whose name a status carries.
+2. **Hold the App's private key as an environment secret**, not a repository
+   secret. A repository secret is released to a workflow on any branch the
+   moment a job names it; an environment secret is released only to jobs
+   that declare the environment and pass its protection rules.
+3. **Restrict the environment's deployment branch policy to the default
+   branch.** A job on a topic branch that declares the environment is
+   refused the secret before its first step runs. The sweep still
+   qualifies: its triggers (`pull_request_target`, `workflow_run`,
+   `schedule`) all run against the base or default branch ref, not the
+   topic branch.
+4. **Point the sweep at the App token**: declare the environment on the
+   sweep job, mint an installation token in a step before the action
+   (GitHub's own `actions/create-github-app-token` does this from the App
+   ID and key), pass it as this action's `token` input, and drop
+   `statuses: write` from the workflow's `permissions` block — the
+   workflow's own token no longer needs to write anything.
+5. **In the ruleset, require the `codex` status from that App
+   specifically**, not from any source. This is the step that closes the
+   door; the previous four only make it possible.
+
+**Relay the comment triggers first — this step is load-bearing, not
+optional.** The sweep as templated above subscribes to `issue_comment` and
+`pull_request_review_comment`, and the section above records that one of
+those was observed running a workflow file that existed only on a pull
+request's branch while reporting the default branch as its ref. That is
+tolerable today, because the branch could publish the status directly
+anyway. It stops being tolerable the moment this job can read an App key:
+a deployment-branch policy authorizes by the ref the run reports, so a
+collaborator's branch would supply its own steps, pass the policy on the
+default branch's name, and be handed the private key — turning the
+credential from a boundary into an exfiltration target, and the resulting
+forgery would carry the App's own attribution. So before adding the
+secret, move both comment events onto the unprivileged listener and relay
+them through `workflow_run` exactly as `pull_request_review` already is,
+or drop them (the schedule and `pull_request_target` still cover every
+verdict, a cron interval later). The rule the credential depends on is
+absolute: **nothing but `workflow_run`, `schedule`, and
+`pull_request_target` may trigger the job that can read the key.**
+
+Prerequisites, stated honestly. Environments with deployment branch
+policies and environment secrets are free on public repositories but need a
+paid plan on private ones. The boundary holds against collaborators with
+*write*, not *admin* — an admin can edit the ruleset, the environment, and
+the App installation, so anyone you would not trust to publish the status
+must not hold admin. And the credential changes only *who can publish*: the
+job holding the App token must still run nothing but default-branch
+definitions and must never check out or execute pull-request code, or the
+trigger-list discipline above is what you have lost.
+
+Until that day, skip all of this. A single-writer repository gains nothing
+from it but setup and a second credential to rotate.
 
 ## Versioning
 
