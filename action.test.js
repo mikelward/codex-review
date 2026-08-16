@@ -201,6 +201,42 @@ describe("action.yml", () => {
     expect(listener).not.toMatch(/secrets:/);
   });
 
+  it("documents the verdict-read protocol, every source by name", () => {
+    // The protocol paragraph exists because two state reports in one session
+    // were each assembled from a single surface, and both were wrong. Each
+    // source it requires is pinned by name, so a later edit cannot quietly
+    // drop one while the paragraph itself survives — which is exactly the
+    // silent regression a prose contract invites.
+    const section = readme.match(/\*\*Reading the verdict is a protocol[\s\S]*?\n\n## /)?.[0];
+    expect(typeof section).toBe("string");
+    expect(section).toMatch(/reactions/);
+    expect(section).toMatch(/\breviews\b/);
+    expect(section).toMatch(/review\s+comments/);
+    expect(section).toMatch(/issue\s+comments/);
+    expect(section).toMatch(/commit\s+status/);
+    // The trap the paragraph names: the status is not a check run, and a
+    // reader who only lists check runs never sees it.
+    expect(section).toMatch(/separate\s+API\s+surface\s+from\s+check\s+runs/);
+  });
+
+  it("documents the expected consumer ruleset, all three rules and both holds", () => {
+    // Consumers configure branch protection from this section alone, so a
+    // rule dropped from it is a consumer left unprotected with nothing red
+    // anywhere. All three rules, both reliable holds, the per-pull-request
+    // auto-merge opt-in (the repository setting only PERMITS auto-merge; a PR
+    // that never opts in sits open forever looking approved), and the honest
+    // best-effort framing of reaction holds.
+    const section = readme.match(/## The ruleset this expects\n[\s\S]*?\n## /)?.[0];
+    expect(typeof section).toBe("string");
+    expect(section).toMatch(/Require the `codex` status check/);
+    expect(section).toMatch(/Require\s+conversation\s+resolution/);
+    expect(section).toMatch(/Allow\s+auto-merge/);
+    expect(section).toMatch(/each\s+pull\s+request/);
+    expect(section).toMatch(/review\s+thread/);
+    expect(section).toMatch(/draft/);
+    expect(section).toMatch(/best\s+effort/);
+  });
+
   it("names one ref throughout, template and prose alike", () => {
     // The prose around the template mentions refs too, and a reader who
     // follows those rather than the code block has to land in the same place.
