@@ -1,0 +1,25 @@
+name: codex-review-listener
+
+# Hears the one verdict delivery the sweep's own triggers cannot safely hear.
+# `pull_request_review` is a merge-ref event -- GitHub runs the workflow file
+# from refs/pull/<n>/merge, the pull request's own version -- so it must never
+# appear on a workflow that can write commit statuses. This listener declares
+# no permissions and does one no-op step. That is least-privilege hygiene,
+# not a wall: a same-repository branch can edit any workflow file, this one
+# included, and grant itself what it likes -- but that attacker never needed
+# this file, since a workflow of their own on `push` could publish the
+# status directly. What the relay guarantees is narrower and real: the
+# workflow that CAN write statuses only ever runs its default-branch
+# definition. Its completion starts the sweep above via `workflow_run`.
+on:
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions: {}
+
+jobs:
+  heard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: 'true'

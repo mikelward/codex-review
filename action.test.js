@@ -151,6 +151,21 @@ describe("action.yml", () => {
     expect((minutes * 60) / seconds).toBeLessThan(120);
   });
 
+  it("is installed on this repository, verbatim from the template", () => {
+    // The self-install's whole claim is that what runs HERE is the README's
+    // consumer template; this is the assertion behind the claim, so drift
+    // in the installed triggers, permissions, or action reference goes red
+    // instead of quietly diverging from what consumers are told to copy.
+    // The sweep file carries a short leading comment naming why the action
+    // is installed on itself, so it must END with the block; the listener
+    // is the block, byte for byte.
+    const blocks = [...readme.matchAll(/```yaml\n([\s\S]*?)```/g)].map((m) => m[1]);
+    const sweep = readFileSync(".github/workflows/codex-review.yml", "utf8");
+    const listener = readFileSync(".github/workflows/codex-review-listener.yml", "utf8");
+    expect(sweep.endsWith(blocks[0])).toBe(true);
+    expect(listener).toBe(blocks[1]);
+  });
+
   it("is installed the way the README says", () => {
     // The README is the only installation instruction there is, so a `uses:`
     // line in it that names a ref nobody publishes is a broken install with
