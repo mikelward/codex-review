@@ -160,6 +160,26 @@ describe("action.yml", () => {
     expect(uses).toEqual([CONSUMER_REF]);
   });
 
+  it("templates every trigger a verdict can arrive through, and no unsafe one", () => {
+    // The template is copied into consumers by hand, so a trigger dropped here
+    // is a delivery form no future consumer hears — findings submitted as a
+    // review with no inline comments emit only `pull_request_review`, which is
+    // exactly the kind of quiet gap this block exists to close. And the unsafe
+    // direction is quieter still: `workflow_dispatch` runs the workflow file
+    // from a caller-chosen ref and a bare `pull_request` from the merge ref,
+    // so either appearing in the template hands a branch the `statuses: write`
+    // steps. Prove the extraction found the block before asserting over it.
+    const on = readme.match(/^on:\n([\s\S]*?)\n\npermissions:/m)?.[1];
+    expect(typeof on).toBe("string");
+    expect(on).toMatch(/schedule:\n\s+- cron: '23 \* \* \* \*'/);
+    expect(on).toMatch(/pull_request_target:\n\s+types: \[opened, reopened, ready_for_review, synchronize, closed\]/);
+    expect(on).toMatch(/issue_comment:\n\s+types: \[created, edited\]/);
+    expect(on).toMatch(/pull_request_review_comment:\n\s+types: \[created, edited\]/);
+    expect(on).toMatch(/pull_request_review:\n\s+types: \[submitted, edited, dismissed\]/);
+    expect(on).not.toMatch(/workflow_dispatch/);
+    expect(on).not.toMatch(/\bpull_request:/);
+  });
+
   it("names one ref throughout, template and prose alike", () => {
     // The prose around the template mentions refs too, and a reader who
     // follows those rather than the code block has to land in the same place.
