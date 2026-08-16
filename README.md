@@ -31,6 +31,8 @@ on:
     types: [created, edited]
   pull_request_review_comment:
     types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
 
 permissions:
   contents: read
@@ -52,6 +54,25 @@ jobs:
 
 Then add `codex` to the required status checks for your default branch. Until
 you do, the status is published and ignored.
+
+`pull_request_review` is in the list for the delivery form the other events
+miss: findings submitted as a review with **no inline comments** emit neither
+comment event, and an edited or dismissed review changes what a sweep should
+read.
+
+On a private repository, consider dropping the `schedule` block — each idle
+fire bills a rounded-up minute (~720/month at hourly). What it costs you: on
+the **approval** side nothing but latency, since everything the cron backstops
+there is fail-closed and any comment or push clears it on demand. On the
+**hold** side, be honest about what the cron never bought: once a sweep
+publishes `success`, auto-merge can fire within seconds, so a 👀 or 👎 placed
+*after* the verdict was never a reliable stop with or without a schedule — the
+cron only narrowed the corner where something else (CI still running) happened
+to be blocking when the hold landed, and dropping it widens that corner to
+indefinite. A hold placed *before* the verdict is honored either way, because
+the sweep that reads the verdict reads the hold too. The reliable stop is the
+one the section below already names: convert the pull request to a draft,
+which disables auto-merge instantly and needs no sweep.
 
 No `with:` block is needed: the token and repository default to the calling
 workflow's own. `loop-minutes` and `interval-seconds` are the two knobs, and
