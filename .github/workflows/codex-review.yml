@@ -1,0 +1,36 @@
+# The action this repository ships, installed on itself: PRs here gate on
+# the same codex status consumers require. Both files below are the
+# README's consumer template, verbatim — action.test.js pins the template,
+# so drift between what we document and what we run shows up as a diff in
+# the same commit.
+name: codex-review
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, synchronize, closed]
+  issue_comment:
+    types: [created, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+  workflow_run:
+    workflows: [codex-review-listener]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+  statuses: write
+
+concurrency:
+  group: codex-review
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - uses: mikelward/codex-review@main
