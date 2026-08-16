@@ -152,6 +152,47 @@ fights you.
 Human review threads are deliberately not modeled. GitHub's *require
 conversation resolution* setting does that natively, and better.
 
+**Reading the verdict is a protocol, not a glance.** The reaction is only the
+CLEAN channel: findings arrive as review comments, as top-level comments, or
+as reviews, and none of those move the reaction count — so "no reaction yet"
+and "unread findings waiting" are indistinguishable from the pull request
+body, and a PR whose `updated_at` moved without a reaction usually means the
+second. Anyone — agent or person — reporting this gate's state reads all of
+it, every time: the PR-body reactions, the reviews, the review comments and
+the issue comments to their last pages, and, where a ruleset requires it, the
+`codex` **commit status** itself, which is a separate API surface from check
+runs and never appears among them. A state report assembled from fewer
+sources than that is a guess, and this file is the standing instruction not
+to make one.
+
+## The ruleset this expects
+
+The status is only as strong as the rules that require it. The recommended
+consumer configuration, in the repository's rules for its default branch:
+
+- **Require the `codex` status check** — the reason this action exists, since
+  nothing else makes the verdict blocking.
+- **Require conversation resolution.** GitHub evaluates it at merge time,
+  with no polling and no staleness window, which makes it strictly more
+  reliable than anything reaction-based — and it covers human review threads,
+  which this action deliberately does not model.
+- **Allow auto-merge**, so a pull request lands the moment its verdict does.
+  This repository setting only *permits* auto-merge; it merges nothing by
+  itself. Auto-merge is armed on each pull request individually — the
+  "Enable auto-merge" button, `gh pr merge --auto`, or the API — and a PR
+  nobody armed sits open looking approved, indefinitely. Arming requires
+  merge access, so for an external contributor's pull request it is a
+  maintainer (or their automation) who arms it, not the author; an armed one
+  still waits for every required check and every unresolved conversation.
+
+With conversation resolution on, the dependable **hold** is a review thread
+("hold — I want a look at this first"): it blocks natively until resolved.
+Converting to draft stops auto-merge instantly. The 👀/👎 reaction holds stay
+honored by the sweep as best effort — on a repository without the resolution
+rule they are better than nothing — but once `success` publishes, auto-merge
+can fire within seconds, so a reaction placed after the verdict was never a
+reliable stop and is not one here.
+
 ## Why the workflow lives in your repo
 
 The action is the sweep. The workflow around it is a security boundary, and it
