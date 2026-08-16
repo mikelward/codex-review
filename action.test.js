@@ -164,20 +164,41 @@ describe("action.yml", () => {
     // The template is copied into consumers by hand, so a trigger dropped here
     // is a delivery form no future consumer hears — findings submitted as a
     // review with no inline comments emit only `pull_request_review`, which is
-    // exactly the kind of quiet gap this block exists to close. And the unsafe
-    // direction is quieter still: `workflow_dispatch` runs the workflow file
-    // from a caller-chosen ref and a bare `pull_request` from the merge ref,
-    // so either appearing in the template hands a branch the `statuses: write`
-    // steps. Prove the extraction found the block before asserting over it.
-    const on = readme.match(/^on:\n([\s\S]*?)\n\npermissions:/m)?.[1];
+    // exactly the kind of quiet gap the listener exists to close. And the
+    // unsafe direction is quieter still: `workflow_dispatch` runs the workflow
+    // file from a caller-chosen ref, and `pull_request` AND
+    // `pull_request_review` from the merge ref, so any of them appearing on
+    // the SWEEP hands a branch the `statuses: write` steps. The merge-ref
+    // event therefore lives on the unprivileged listener, relayed to the
+    // sweep by `workflow_run`, whose definition GitHub always takes from the
+    // default branch. Prove the extraction found both blocks before asserting.
+    const blocks = [...readme.matchAll(/```yaml\n([\s\S]*?)```/g)].map((m) => m[1]);
+    expect(blocks).toHaveLength(2);
+    const [sweep, listener] = blocks;
+
+    const on = sweep.match(/^on:\n([\s\S]*?)\n\npermissions:/m)?.[1];
     expect(typeof on).toBe("string");
     expect(on).toMatch(/schedule:\n\s+- cron: '23 \* \* \* \*'/);
     expect(on).toMatch(/pull_request_target:\n\s+types: \[opened, reopened, ready_for_review, synchronize, closed\]/);
     expect(on).toMatch(/issue_comment:\n\s+types: \[created, edited\]/);
     expect(on).toMatch(/pull_request_review_comment:\n\s+types: \[created, edited\]/);
-    expect(on).toMatch(/pull_request_review:\n\s+types: \[submitted, edited, dismissed\]/);
+    expect(on).toMatch(/workflow_run:\n\s+workflows: \[codex-review-listener\]\n\s+types: \[completed\]/);
     expect(on).not.toMatch(/workflow_dispatch/);
     expect(on).not.toMatch(/\bpull_request:/);
+    expect(on).not.toMatch(/pull_request_review:/);
+
+    // The listener: hears the merge-ref event, holds nothing worth stealing.
+    // Its `name:` is what the sweep's workflow_run trigger matches on, so the
+    // pair is asserted together — renaming one without the other severs the
+    // relay silently.
+    expect(listener).toMatch(/^name: codex-review-listener$/m);
+    expect(listener).toMatch(/pull_request_review:\n\s+types: \[submitted, edited, dismissed\]/);
+    // The prose in its header names `statuses: write` as the thing it must
+    // never hold, so the negative assertion targets the GRANT shape — a
+    // permissions key — not the word.
+    expect(listener).toMatch(/^permissions: \{\}$/m);
+    expect(listener).not.toMatch(/statuses:\s*(write|read)/);
+    expect(listener).not.toMatch(/secrets:/);
   });
 
   it("names one ref throughout, template and prose alike", () => {
