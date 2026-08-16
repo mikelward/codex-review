@@ -100,16 +100,25 @@ export const MAX_FAIL_STREAK = 5;
 /**
  * Minutes an unanswered head keeps the fast clock before the loop parks it.
  *
- * Codex answers within a few minutes of the push that woke it, or it never
- * started — so polling an unanswered head for an hour buys nothing and is
- * what let a forgotten PR with no verdict keep every loop alive its full 55
- * minutes, restarted by the schedule forever. Past this age the head still
- * gates `pending` (nothing fails open), it just stops counting as awaiting:
- * the retry is a nudge or a push, both events that restart the clock. A 👀
- * is exempt — eyes on means the review genuinely started, and long reads
- * are what the 55-minute loop is for.
+ * The window exists so a forgotten PR with no verdict cannot keep every
+ * loop alive its full 55 minutes, restarted by the schedule forever. Past
+ * this age the head still gates `pending` (nothing fails open), it just
+ * stops counting as awaiting: the retry is a nudge or a push, both events
+ * that restart the clock. A 👀 is exempt — eyes on means the review
+ * genuinely started, and long reads are what the 55-minute loop is for.
+ *
+ * Thirty, not ten, and the difference was paid for: under a burst of
+ * pushes (several amends across sibling repos inside ten minutes) Codex
+ * queues, the 👀 does not land until it actually starts, and the answer
+ * arrived at minute nine-to-twelve — right at the old park. A parked head
+ * has no loop left to see the 👍, the reaction emits no webhook, and the
+ * hourly schedule was the next reader: five pull requests sat mergeable
+ * for most of an hour on 2026-08-16 for exactly this. The window is a
+ * ceiling, not a duration — an answered head ends the loop within a poll
+ * interval — so widening it is paid only by a head Codex never answers,
+ * once per push, while a too-narrow window recurs as stalled afternoons.
  */
-export const UNANSWERED_MINUTES = 10;
+export const UNANSWERED_MINUTES = 30;
 
 const stripBot = (login) => String(login ?? "").replace(/\[bot\]$/, "");
 export const matchesBot = (login, botLogin = CODEX_BOT) =>
