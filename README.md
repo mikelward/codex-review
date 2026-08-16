@@ -31,8 +31,9 @@ on:
     types: [created, edited]
   pull_request_review_comment:
     types: [created, edited]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
+  workflow_run:
+    workflows: [codex-review-listener]
+    types: [completed]
 
 permissions:
   contents: read
@@ -52,13 +53,65 @@ jobs:
       - uses: mikelward/codex-review@main
 ```
 
+And alongside it, as `codex-review-listener.yml`, the unprivileged half:
+
+```yaml
+name: codex-review-listener
+
+# Hears the one verdict delivery the sweep's own triggers cannot safely hear.
+# `pull_request_review` is a merge-ref event -- GitHub runs the workflow file
+# from refs/pull/<n>/merge, the pull request's own version -- so it must never
+# appear on a workflow that can write commit statuses. This listener declares
+# no permissions and does one no-op step. That is least-privilege hygiene,
+# not a wall: a same-repository branch can edit any workflow file, this one
+# included, and grant itself what it likes -- but that attacker never needed
+# this file, since a workflow of their own on `push` could publish the
+# status directly. What the relay guarantees is narrower and real: the
+# workflow that CAN write statuses only ever runs its default-branch
+# definition. Its completion starts the sweep above via `workflow_run`.
+on:
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions: {}
+
+jobs:
+  heard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: 'true'
+```
+
 Then add `codex` to the required status checks for your default branch. Until
 you do, the status is published and ignored.
 
-`pull_request_review` is in the list for the delivery form the other events
-miss: findings submitted as a review with **no inline comments** emit neither
+The listener exists for the delivery form the sweep's other events miss:
+findings submitted as a review with **no inline comments** emit neither
 comment event, and an edited or dismissed review changes what a sweep should
-read.
+read. It is a separate workflow because `pull_request_review` resolves the
+workflow definition against the pull request's merge ref — on a workflow with
+`statuses: write`, a same-repository pull request could substitute its own
+steps and publish `codex: success` for itself. The relay splits the event
+from the privilege: the sweep that can write statuses runs only
+default-branch definitions (`workflow_run` is documented to). The relay also
+fixes the fork case for free — a fork's `pull_request_review` run gets a
+read-only token whatever the file declares, so a direct trigger could not
+have published anyway, while the `workflow_run` half runs in the base
+repository with the full grant.
+
+Be precise about what that buys, because the listener's `permissions: {}` is
+not it. A same-repository branch can edit the listener — or add any workflow
+of its own — and grant itself `statuses: write` directly; no YAML in this
+repository can prevent that, because the grant lives in branch-editable
+files. That attacker is the one the earlier note already priced in: push
+access to this repository has always been able to publish the status with an
+ordinary `on: push` workflow, so the listener adds no exposure that was not
+already there. The bright line the relay preserves is reviewable and narrow:
+**no merge-ref event ever appears on the workflow that writes statuses**, so
+substituting the sweep's own definition — the quiet route — stays closed,
+and the trigger lists that decide it stay in files a reviewer of the default
+branch can read.
 
 On a private repository, consider dropping the `schedule` block — each idle
 fire bills a rounded-up minute (~720/month at hourly). What it costs you: on
