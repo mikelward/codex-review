@@ -953,9 +953,9 @@ describe("sweep", () => {
       log: () => {}, now: () => Date.parse(t),
     });
     // The suite says the head arrived two minutes ago: keep the clock.
-    expect((await at("2026-08-14T12:04:00Z", "2026-08-14T12:06:00Z")).awaiting).toBe(1);
+    expect((await at("2026-08-14T12:24:00Z", "2026-08-14T12:26:00Z")).awaiting).toBe(1);
     // An old suite corroborates the old marker: park.
-    expect((await at("2026-08-14T11:39:00Z", "2026-08-14T12:06:00Z")).awaiting).toBe(0);
+    expect((await at("2026-08-14T11:39:00Z", "2026-08-14T12:26:00Z")).awaiting).toBe(0);
   });
 
   it("keeps the rescue from lowering the bound past the branch-born suite", async () => {
@@ -1349,9 +1349,9 @@ describe("sweep", () => {
       log: () => {}, now: () => Date.parse(t),
     });
     // Inside the window the head keeps the fast clock…
-    expect((await at("2026-08-14T12:09:00Z")).awaiting).toBe(1);
+    expect((await at("2026-08-14T12:29:00Z")).awaiting).toBe(1);
     // …and past it the loop parks, with nothing written over the gate.
-    const parked = await at("2026-08-14T12:11:00Z");
+    const parked = await at("2026-08-14T12:31:00Z");
     expect(parked.awaiting).toBe(0);
     expect(parked.written).toEqual([]);
   });
@@ -1386,8 +1386,8 @@ describe("sweep", () => {
       }).impl,
       log: () => {}, now: () => Date.parse(t),
     });
-    expect((await at("2026-08-14T12:15:00Z")).awaiting).toBe(1);
-    expect((await at("2026-08-14T12:21:00Z")).awaiting).toBe(0);
+    expect((await at("2026-08-14T12:35:00Z")).awaiting).toBe(1);
+    expect((await at("2026-08-14T12:41:00Z")).awaiting).toBe(0);
   });
 
   it("gives a just-gated head the full window whatever its records say", async () => {
