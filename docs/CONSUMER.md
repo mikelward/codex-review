@@ -245,6 +245,136 @@ behind `statuses: write`, and a second status writer is worse than the window �
 that configuration existed as a `codex-verdict-reset` workflow and was deleted
 for producing unordered writes.
 
+## Known limitation: fork pull requests and `codex-review-check`
+
+`codex-review-check` reports against the pull request head through its
+**`push`** trigger, which fires when the branch is pushed to this repository.
+A fork's push happens in the fork, so it creates no check run here; and
+`pull_request_target`, which does run here, is documented to set `GITHUB_SHA`
+to the base branch tip rather than the head. So a fork pull request can end up
+with no `codex-review-check / codex-review-check` on its head at all — and if
+you have made that check required, such a pull request is blocked by a check
+that can never report. A required check a whole class of pull request cannot
+satisfy is worse than the hole it closes.
+
+**This is recorded rather than fixed, deliberately.** It is unconfirmed: no
+fork pull request has been observed against these repositories, and the
+same-repo evidence points the other way — the sweep's own `pull_request_target`
+run carries the pull request head as its `head_sha`, though a same-repo head
+branch exists here in a way a fork's does not. Every repository consuming this
+today takes same-repo pull requests only, where the `push` trigger covers it.
+
+**The remedy, when a fork pull request matters:** have
+`check-consumer.yml` publish its result as a check run against
+`github.event.pull_request.head.sha || github.sha` explicitly, the way the sweep already
+targets `pr.headRefOid` for the `codex` status — which is why *that* one is
+head-associated whatever the trigger. Use **`checks: write`** on the caller,
+not `statuses: write`: the sole-writer rule below is about the statuses scope,
+and a second holder of it could overwrite the `codex` verdict, so borrowing a
+different scope keeps that invariant untouched.
+
+**Both ends need the scope, and this is the part that would waste an
+afternoon.** A reusable workflow's own `permissions:` block can only *narrow*
+what the caller passes, never widen it — so `check-consumer.yml`, which today
+declares `contents: read` and nothing else, would silently strip `checks:
+write` back off however generously the caller granted it. The Checks API call
+then fails and the newly required check never reports, which is the same
+unsatisfiable-required-check failure this whole section is about. Grant it in
+**both** files.
+
+`check_consumer.py` lets the caller through unchanged: `judge` reads what a
+value *grants* and objects only to `statuses: write`, so `checks: write`
+already reads as safe, and the byte-for-byte pin compares against whatever
+`templates/` says. Do not "make room" for it by loosening the permission scan —
+nothing is in the caller's way.
+
+**But the scan has to get *stricter* about everyone else, and this is the part
+that turns the remedy into a hole if it is skipped.** The moment consumers
+require a *self-published* `codex-review-check` instead of the
+reusable-workflow context, that name becomes something any workflow holding
+`checks: write` can create — and a `push` workflow's definition comes from the
+branch (see the section below). A contributor could add a workflow granting
+itself `checks: write` and publish a passing `codex-review-check` on its own
+SHA, satisfying the gate while the real checker rejects the edit that put it
+there. Today `checks: write` is harmless because nothing required depends on
+it; the remedy is what makes it a forging capability. So implementing this
+means extending the scan to reserve `checks: write` for the pinned checker
+caller and reject it in every other workflow, exactly as it already reserves
+`statuses: write` for the sweep.
+
+Consumers would then require
+the self-published `codex-review-check` rather than the reusable-workflow
+context `codex-review-check / codex-review-check`, which is a ruleset edit in
+each of them — cheapest while few consumers require it.
+
+**That is half the gate, and the other half is deliberate.** A fork pull
+request would still fail the required `codex` status, for an unrelated reason
+of its own: the sweep dates a head's arrival on its branch from the head's
+check suites, and GitHub reports `head_branch: null` for a fork head's suites,
+so a fork head is undatable forever and `judge` fails it closed — a fork's 👍
+never opens the gate, however fresh. That floor is what stops the previous
+head's lingering 👍 approving a commit nobody reviewed on a fast-forward, and
+an earlier exemption that fell back to the status bound was a fail-open hole
+wearing a compatibility excuse, so it is not a line to delete on the way past.
+Doing this remedy alone therefore removes one unsatisfiable required check and
+leaves the other standing: fork contributions still merge by admin override or
+by re-pushing to a same-repo branch, where every floor applies. Anyone taking
+fork support seriously needs both changes, and the `codex` one first, since it
+is the one with a way to get the answer wrong.
+
+**Do not fix it with a plain `pull_request` trigger.** That loads the job
+definition from the pull request's merge ref, so a fork could replace the call
+to the shared reusable workflow with a job of the same name that always
+succeeds — defeating, for fork pull requests specifically, the check whose
+entire purpose is to detect exactly that edit.
+
+## Known limitation: the head's `codex-review-check` comes from `push`
+
+The same mechanism as above, seen from the other side, and it is the sharper
+of the two because it applies to the same-repository pull requests these
+repositories actually take.
+
+`codex-review-check.yml` has two triggers. The `pull_request_target` one is
+trusted — its definition comes from the default branch — but it does not
+report on the pull request's head. The run that *does* land on the head is the
+**`push`** one, and a `push` workflow's definition comes from the pushed
+branch: the pull request's own. Verified rather than reasoned about — on
+`mikelward/root#44`, the check run carrying the head SHA belongs to a run with
+`event: push` and `path: .github/workflows/codex-review-check.yml`.
+
+So a same-repository pull request can edit that file to declare a job named
+`codex-review-check` calling something other than the shared checker, and the
+required context `codex-review-check / codex-review-check` reports green on
+the head having checked nothing. The context is two names — the caller's job
+and the called workflow's job — but both are the pull request's to choose.
+`check_consumer.py` would catch the edit if it ran; the point is that this
+route is how it does not run.
+
+**The obvious remedy is not available to these repositories.** GitHub can
+require a *workflow* rather than a status context, pinned to a repository and
+ref — `mikelward/codex-review/.github/workflows/check-consumer.yml@main` under
+**Require workflows to pass before merging** — and that would evaluate code the
+pull request cannot supply, which is exactly what the required status context
+cannot promise. But that rule exists only in **organization** rulesets, and
+these nine repositories are on a personal account. So it is the answer if they
+ever move to an organization, and no answer at all today.
+
+**The remedy that is available is to move the check inside the sweep.** The
+sweep already runs from `pull_request_target` and `schedule` — both
+default-branch-defined, so never the pull request's to rewrite — and it already
+holds `statuses: write` as the sole writer of a required status. Having it run
+the consumer comparison itself, and fold a mismatch into the `codex` verdict,
+puts the check behind a gate a branch cannot forge, with no new scope and no
+new required context anywhere. That is a real change to the action rather than
+a configuration edit, so it is written down here rather than done.
+
+Until one of those happens, treat `codex-review-check` as verification against
+**accident** rather than against a motivated edit: it catches drift, a bad
+copy, a half-finished conversion, which is most of what actually goes wrong.
+The `codex` status is unaffected either way, for the same reason the second
+remedy works — the sweep's definition comes from the default branch, so the
+verdict gate itself is never the pull request's to rewrite.
+
 ## How the check reads your workflows
 
 [`check_consumer.py`](../check_consumer.py) asks two questions by deliberately

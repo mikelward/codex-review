@@ -226,6 +226,88 @@ describe("action.yml", () => {
     expect(section).toMatch(/separate\s+API\s+surface\s+from\s+check\s+runs/);
   });
 
+  it("documents the fork limitation with the remedy and the trap", () => {
+    // Recorded rather than fixed, by decision: no fork pull request has been
+    // observed against these repositories, so this is a note for whoever
+    // meets one first. That makes it exactly the kind of prose that rots —
+    // the section survives while the part that makes it actionable is
+    // trimmed — so the load-bearing claims are pinned individually.
+    const doc = readFileSync("docs/CONSUMER.md", "utf8");
+    const section = doc.match(/## Known limitation: fork pull requests[\s\S]*?\n## /)?.[0];
+    expect(typeof section).toBe("string");
+    // Why it happens: the head-associated check comes from `push`, which a
+    // fork does not perform here.
+    expect(section).toMatch(/`push`/);
+    expect(section).toMatch(/pull_request_target/);
+    // The remedy, including the scope that keeps the sole-writer rule intact.
+    expect(section).toMatch(/head\.sha/);
+    expect(section).toMatch(/`checks: write`/);
+    expect(section).toMatch(/not `statuses: write`/);
+    // The half that makes the remedy actually work: a reusable workflow's
+    // permissions block can only narrow what the caller passes, so granting
+    // the scope in the caller alone is silently stripped by
+    // check-consumer.yml's own `contents: read` — and the required check
+    // then never reports, which is the failure this section is about.
+    expect(section).toMatch(/[Bb]oth ends need the scope/);
+    expect(section).toMatch(/narrow/);
+    expect(section).toMatch(/check-consumer\.yml/);
+    // And the instruction NOT to loosen the permission scan while
+    // implementing it: `judge` already reads `checks: write` as safe, so an
+    // implementer "making room" for it would only weaken the check that
+    // keeps the sole statuses writer sole.
+    expect(section).toMatch(/lets the caller through unchanged/);
+    // The other direction, which is what makes the remedy safe rather than a
+    // new hole: once a self-published context is required, `checks: write`
+    // becomes a forging capability, so the scan must reserve it the way it
+    // already reserves `statuses: write`.
+    expect(section).toMatch(/stricter/);
+    expect(section).toMatch(/reserve `checks: write`/);
+    // And the push-run fallback: `github.event.pull_request` is absent on a
+    // push, so publishing against head.sha alone leaves ordinary runs red.
+    expect(section).toMatch(/head\.sha \|\| github\.sha/);
+    expect(section).toMatch(/loosening the\s+permission scan|loosen the\s+permission scan/);
+    // And that the remedy is only half the gate: the `codex` status blocks a
+    // fork head separately and on purpose, because a fork's check suites
+    // carry no head_branch and so never date the head's arrival. Without
+    // this, an implementer does the whole `checks: write` migration and the
+    // fork pull request is still unmergeable, by a floor they were never
+    // told about.
+    expect(section).toMatch(/head_branch/);
+    expect(section).toMatch(/undatable/);
+    expect(section).toMatch(/admin override/);
+    // And the trap: the obvious fix reopens the hole the check exists for.
+    expect(section).toMatch(/Do not fix it with a plain `pull_request` trigger/);
+  });
+
+  it("documents that the head's check comes from the PR's own push", () => {
+    // The sharper of the two limitations, because it applies to the
+    // same-repository pull requests these repositories actually take: the
+    // run that lands on the head is the `push` one, whose definition is the
+    // pull request's. Without this written down, a consumer requires the
+    // context believing it proves something it cannot.
+    const doc = readFileSync("docs/CONSUMER.md", "utf8");
+    const section = doc.match(/## Known limitation: the head's `codex-review-check`[\s\S]*?\n## /)?.[0];
+    expect(typeof section).toBe("string");
+    // The mechanism, and that it was observed rather than reasoned out.
+    expect(section).toMatch(/`push`/);
+    expect(section).toMatch(/event: push/);
+    // The remedy is a ruleset setting naming a workflow, not a context.
+    expect(section).toMatch(/Require workflows to pass before merging/);
+    expect(section).toMatch(/check-consumer\.yml@main/);
+    // ...and that it is organization-only, so it is not available to these
+    // repositories today. Without this the section reads as an actionable fix
+    // nobody can action.
+    expect(section).toMatch(/organization/);
+    expect(section).toMatch(/personal account/);
+    // The remedy that IS available: move the comparison inside the sweep,
+    // whose definition a branch cannot supply.
+    expect(section).toMatch(/inside the sweep/);
+    // And the bound on what is actually at risk: the verdict gate is not,
+    // because the sweep's definition is never the pull request's.
+    expect(section).toMatch(/accident/);
+    expect(section).toMatch(/pull_request_target/);
+  });
+
   it("documents the expected consumer ruleset, all three rules and both holds", () => {
     // Consumers configure branch protection from this section alone, so a
     // rule dropped from it is a consumer left unprotected with nothing red
