@@ -16,6 +16,7 @@ import {
   MAX_FAIL_STREAK,
   utc,
   input,
+  cleanVerdict,
 } from "./codex-review.mjs";
 
 describe("verdictFor", () => {
@@ -271,7 +272,7 @@ describe("commentSignals", () => {
     // where a wrong "findings" strands the verdict on the throttled
     // schedule.
     expect(commentSignals([c(`${CODEX_BOT}[bot]`, "2026-08-15T08:00:00Z")], { since: undefined, owner: OWNER }))
-      .toEqual({ codexAt: null, nudgeAt: null });
+      .toEqual({ codexAt: null, nudgeAt: null, cleanAt: null });
   });
 });
 
@@ -655,6 +656,77 @@ describe("sweep", () => {
     const out = await runFull(fake);
     expect(out.awaiting).toBe(1);
     expect(out.written[0].description).toBe(FINDINGS);
+  });
+
+  it("approves on a clean comment that names this head", async () => {
+    // Codex's footer promises a 👍 when it finds nothing; on codex-review#13
+    // it posted a clean COMMENT instead and reacted to the nudge rather than
+    // the PR body. With the reaction channel empty the gate read "answered,
+    // not approved" = FINDINGS, over a pull request with no finding anywhere
+    // on it. A clean verdict naming the head is the same attributable
+    // evidence a review gives, so it approves.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [{
+          user: { login: `${CODEX_BOT}[bot]` },
+          created_at: AFTER,
+          body: "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `abc1234`",
+        }],
+      },
+      graphqlResponses: [repoPRs([prNode()])],
+    });
+    const out = await runFull(fake);
+    expect(out.written[0].state).toBe("success");
+    expect(out.awaiting).toBe(0);
+  });
+
+  it("stops approving when findings land after the clean comment", async () => {
+    // A clean comment then a findings pass on the SAME head -- an owner
+    // nudge is the ordinary route. The reaction may outrank findings
+    // because Codex re-adds it after a re-read; a comment is a fixed point
+    // in time, so the newest Codex answer has to win.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [
+          {
+            user: { login: `${CODEX_BOT}[bot]` },
+            created_at: AFTER,
+            body: "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `abc1234`",
+          },
+          { user: { login: `${CODEX_BOT}[bot]` }, created_at: "2026-08-14T12:09:00Z" },
+        ],
+      },
+      graphqlResponses: [repoPRs([prNode()])],
+    });
+    const out = await runFull(fake);
+    expect(out.written[0].description).toBe(FINDINGS);
+  });
+
+  it("does not let a clean comment on an older commit settle this head", async () => {
+    // simmo#216: a clean comment on 6c493c8, nine hours and one head
+    // earlier, was counted as an answer and published FINDINGS. It is
+    // evidence about code that is gone, so it decides nothing here -- the
+    // head goes back to waiting rather than claiming a verdict.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [{
+          user: { login: `${CODEX_BOT}[bot]` },
+          created_at: AFTER,
+          body: "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `6c493c81`",
+        }],
+      },
+      graphqlResponses: [repoPRs([prNode()])],
+    });
+    const out = await runFull(fake);
+    // Nothing is published: the head's standing marker is already PENDING,
+    // and `publish` skips an unchanged write. Before this, the same fixture
+    // wrote FINDINGS over it. The head also stays on the clock, so the 👍
+    // or the real verdict is still caught within a poll interval.
+    expect(out.written).toEqual([]);
+    expect(out.awaiting).toBe(1);
   });
 
   it("hears a comment finding that landed before the head was first gated", async () => {
@@ -1675,6 +1747,147 @@ describe("input", () => {
     // under the old code and the loop bug looked like a scheduling problem.
     expect(withEnv({ INPUT_REPOSITORY: "owner/name" },
       () => input("repository", "GITHUB_REPOSITORY"))).toBe("owner/name");
+  });
+});
+
+describe("cleanVerdict", () => {
+  const CLEAN = "Codex Review: Didn\u2019t find any major issues. Swish!\n\n**Reviewed commit:** `5f3881b6c0`";
+  const HEAD = "5f3881b6c0fc1c4bb74ca076dc6bac9ddc2631da";
+
+  it("reads a clean comment naming this head", () => {
+    // Codex's footer promises a 👍 when it finds nothing, and it does not
+    // always keep that promise -- it posted exactly this on codex-review#13
+    // and simmo#216, leaving the reaction channel empty and both gates shut.
+    expect(cleanVerdict(CLEAN, HEAD)).toBe("head");
+  });
+
+  it("accepts the straight apostrophe too", () => {
+    expect(cleanVerdict(CLEAN.replace("\u2019", "'"), HEAD)).toBe("head");
+  });
+
+  it("calls a clean verdict on another commit what it is", () => {
+    // simmo#216: a clean comment on 6c493c8 from nine hours earlier was
+    // counted as an ANSWER on a head it had never seen, so the status read
+    // "Codex left findings on this head" with no finding anywhere on it.
+    expect(cleanVerdict(CLEAN, "6c493c8183aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toBe("other");
+  });
+
+  it("does not read a findings comment as clean", () => {
+    expect(cleanVerdict("Codex Review: 2 findings\n\n**Reviewed commit:** `5f3881b6c0`", HEAD)).toBe(null);
+  });
+
+  it("refuses a clean verdict that names no commit", () => {
+    // Unattributable: nothing ties it to this head, and approving on it
+    // would let a word about superseded code open the gate.
+    expect(cleanVerdict("Codex Review: Didn't find any major issues.", HEAD)).toBe(null);
+  });
+
+  it("compares by prefix only in the direction that cannot collide", () => {
+    // Codex abbreviates to ten characters where the API gives forty, so the
+    // named id must be a prefix of the head -- never the reverse, which
+    // would let a forty-character id approve a head it merely starts with.
+    expect(cleanVerdict(CLEAN, "5f3881b6")).toBe("other");
+  });
+
+  it("refuses a headline that continues into its opposite", () => {
+    // "Didn't find any major issues in this fixture, but found a gate bug"
+    // opens with the clean words and reports a finding. A prefix match reads
+    // it as approval, so the sentence has to END at "issues" -- the `.` or
+    // `!` is what separates the real headline from a continuation.
+    const continued = "Codex Review: Didn't find any major issues in this fixture, but found a gate bug.\n\n**Reviewed commit:** `5f3881b6c0`";
+    expect(cleanVerdict(continued, HEAD)).toBe(null);
+  });
+
+  it("refuses the headline anywhere but the first content line", () => {
+    // A fenced or quoted example is not a verdict, and this parser's own
+    // review comments quote the sentence -- so the material to forge one
+    // with is already sitting on the pull request.
+    const fenced = "Here is the shape it matches:\n\n```\nCodex Review: Didn't find any major issues.\n```\n\n**Reviewed commit:** `5f3881b6c0`";
+    expect(cleanVerdict(fenced, HEAD)).toBe(null);
+  });
+
+  it("refuses an unbadged finding on a later line", () => {
+    // The headline is clean and the finding sits two lines down, wearing no
+    // badge. Enumerating forbidden phrases cannot catch this; requiring the
+    // whole known shape does.
+    const later = "Codex Review: Didn't find any major issues.\n\nHowever, I found a blocking bug.\n\n**Reviewed commit:** `5f3881b6c0`";
+    expect(cleanVerdict(later, HEAD)).toBe(null);
+  });
+
+  it("accepts the real comment with its details footer", () => {
+    // The shipped shape: headline, reviewed commit, then Codex's
+    // collapsible boilerplate, which is dropped before the shape is checked.
+    const real = [
+      "Codex Review: Didn't find any major issues. Keep them coming!",
+      "",
+      "**Reviewed commit:** `5f3881b6c0`",
+      "",
+      "<details> <summary>ℹ️ About Codex in GitHub</summary>",
+      "<br/>",
+      "",
+      "Reviews are triggered when you open a pull request for review.",
+      "</details>",
+    ].join("\n");
+    expect(cleanVerdict(real, HEAD)).toBe("head");
+  });
+
+  it("refuses a plain finding that follows the clean headline", () => {
+    // "Didn't find any major issues. However, I found a blocking bug." is a
+    // finding written in prose -- no badge for the second guard to catch --
+    // and a free tail approved it. The line has to BE a clean verdict, not
+    // merely open as one.
+    const however = "Codex Review: Didn't find any major issues. However, I found a blocking bug.\n\n**Reviewed commit:** `5f3881b6c0`";
+    expect(cleanVerdict(however, HEAD)).toBe(null);
+  });
+
+  it("fails closed on a cheer it does not know", () => {
+    // Deliberate: an unrecognized tail returns null, the gate waits for a
+    // reaction, and someone adds the cheer here. That is the degradation
+    // this function promises for wording it has not seen -- the alternative
+    // is a free tail, which is how the finding above got through.
+    const novel = "Codex Review: Didn't find any major issues. Nice one!\n\n**Reviewed commit:** `5f3881b6c0`";
+    expect(cleanVerdict(novel, HEAD)).toBe(null);
+  });
+
+  it("accepts the bare sentence with no cheer at all", () => {
+    expect(cleanVerdict("Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `5f3881b6c0`", HEAD)).toBe("head");
+  });
+
+  it("accepts the real cheers, which vary", () => {
+    const swish = "Codex Review: Didn't find any major issues. Swish!\n\n**Reviewed commit:** `5f3881b6c0`";
+    const keep = "Codex Review: Didn't find any major issues. Keep them coming!\n\n**Reviewed commit:** `5f3881b6c0`";
+    expect(cleanVerdict(swish, HEAD)).toBe("head");
+    expect(cleanVerdict(keep, HEAD)).toBe("head");
+  });
+
+  it("refuses a findings comment that quotes the clean sentence", () => {
+    // Codex quotes this very sentence when it reviews this parser -- the P1
+    // that found this did -- and a findings comment carries the same
+    // `Reviewed commit` footer, so an unanchored match would read a finding
+    // as an approval and publish a false success.
+    const quoting = [
+      "### 💡 Codex Review",
+      "",
+      "The marker `Didn't find any major issues` is matched unanchored here.",
+      "",
+      "**Reviewed commit:** `5f3881b6c0`",
+    ].join("\n");
+    expect(cleanVerdict(quoting, HEAD)).toBe(null);
+  });
+
+  it("refuses a badged finding even if it opens with the clean headline", () => {
+    const badged = `Codex Review: Didn't find any major issues.\n\n![P1 Badge](x) something\n\n**Reviewed commit:** \`5f3881b6c0\``;
+    expect(cleanVerdict(badged, HEAD)).toBe(null);
+  });
+
+  it("refuses the sentence quoted inside a reply", () => {
+    const quoted = "> Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `5f3881b6c0`";
+    expect(cleanVerdict(quoted, HEAD)).toBe(null);
+  });
+
+  it("returns null for an empty or absent body", () => {
+    expect(cleanVerdict(undefined, HEAD)).toBe(null);
+    expect(cleanVerdict("", HEAD)).toBe(null);
   });
 });
 

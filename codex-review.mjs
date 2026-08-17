@@ -8,12 +8,21 @@
 // Codex has looked, and a merged-too-early PR is indistinguishable from a
 // correctly merged one.
 //
-// The reaction is the whole verdict, and that is why this file is small.
+// The reaction is the usual verdict, and that is why this file is small.
 // Codex's own description of itself: "If Codex has suggestions, it will
 // comment; otherwise it will react with 👍." The reaction is therefore present
 // only when it has nothing to say — findings in a review body, in a thread, or
 // in a top-level comment all mean no reaction, and none of them decides the
-// *verdict* here. A submitted review naming the current head is still read,
+// *verdict* here.
+//
+// It does not always keep that promise, which is the one exception: a clean
+// comment naming the head it read approves too — see `cleanVerdict`. Twice in
+// one afternoon Codex answered "Didn't find any major issues" as a comment
+// and left the body unreacted, once putting the 👍 on the nudge comment
+// instead, and the gate published FINDINGS over pull requests with no finding
+// on them. A `success` with no reaction on the body is therefore expected.
+//
+// A submitted review naming the current head is still read,
 // but only for the loop's economics: findings mean the next change is a push,
 // not a reaction, so the minute clock has nothing to catch until then. Codex
 // also revokes the reaction when a new commit lands, so a reaction that is
@@ -248,17 +257,37 @@ export async function codexReviewedAt(api, { owner, name, number, headRefOid, si
  * public, and letting any comment shaped like a nudge hold the loop open
  * would hand passers-by the runner bill.
  */
-export function commentSignals(comments, { since, owner }) {
+export function commentSignals(comments, { since, owner, head }) {
   let codexAt = null;
   let nudgeAt = null;
+  let cleanAt = null;
   const bound = utc(since);
-  if (!bound) return { codexAt, nudgeAt };
+  if (!bound) return { codexAt, nudgeAt, cleanAt };
   for (const c of comments ?? []) {
     const at = utc(c.created_at) ?? "";
     if (matchesBot(c.user?.login)) {
       // Codex's word stays on created_at: its edits do not re-answer, and a
       // later timestamp here could only mask a nudge — the fail-open way.
       if (at <= bound) continue;
+      const clean = cleanVerdict(c.body, head);
+      if (clean === "head") {
+        // An attributable clean verdict: Codex says it found nothing AND
+        // names the commit it read, which is the same standard a review is
+        // held to. Its footer promises a 👍 in this case and it does not
+        // always keep that promise, so the comment has to be a channel too --
+        // otherwise the gate waits forever for a reaction that never comes.
+        if (cleanAt === null || at > cleanAt) cleanAt = at;
+        continue;
+      }
+      if (clean === "other") {
+        // Clean, but about a commit that is not this head -- a verdict on
+        // code that has since been replaced. Counting it as an ANSWER is how
+        // a nine-hour-old "no issues" on a superseded commit came to read as
+        // "Codex left findings on this head". Dropping it can only ever
+        // relax FINDINGS to PENDING, never open the gate, so the fail-closed
+        // direction is preserved.
+        continue;
+      }
       if (codexAt === null || at > codexAt) codexAt = at;
     } else if (
       Boolean(owner) && c.user?.login === owner
@@ -275,25 +304,72 @@ export function commentSignals(comments, { since, owner }) {
       if (nudgeAt === null || asked > nudgeAt) nudgeAt = asked;
     }
   }
-  return { codexAt, nudgeAt };
+  return { codexAt, nudgeAt, cleanAt };
 }
 
 /**
- * Read the PR's comments since the head was committed, to the end.
+ * Classify a Codex comment body against the head under judgement.
  *
- * REST rather than a GraphQL window, because a window can be evicted: a
- * finding pushed past `last:N` by later chatter would read as "no findings",
- * reviving the loop for good. `since` filters server-side, so the normal
- * response is a handful of comments from the current round. No page cap —
- * a cap would re-open the same eviction hole one order of magnitude later;
- * the `< 100` batch check terminates every real walk, and the job timeout
- * backstops a server that pages forever. Only called when the answer can
- * still change the verdict, so it adds no traffic to settled PRs.
+ * Returns `"head"` for a clean verdict naming this head, `"other"` for one
+ * naming a different commit, and `null` for anything else -- which includes
+ * every findings comment and a clean one that names no commit at all.
+ *
+ * Both halves are required. A clean word about superseded code must not
+ * approve whatever is current, and the commit line alone appears on findings
+ * comments too, which name the commit they object to. `null` is the
+ * conservative answer throughout, so an upstream template change degrades to
+ * today's behavior -- the gate holds and waits for a reaction -- rather than
+ * approving something unread.
  */
-export async function codexCommentSignals(api, { owner, name, number, since }) {
+/**
+ * The complete set of tails observed after the clean headline. Empty is the
+ * bare sentence; the other two are Codex's own flourishes.
+ */
+const CLEAN_CHEERS = new Set(["", "Swish!", "Keep them coming!"]);
+
+export function cleanVerdict(body, head) {
+  const text = String(body ?? "");
+  // Validate the WHOLE known structure, not a list of things it must not
+  // say. Four review rounds went the other way -- anchor the marker, end the
+  // sentence, allowlist the cheer -- and each one closed the hole it was
+  // shown while leaving the next position open: a continuation, then a
+  // second sentence, then a later line. Enumerating what a finding might
+  // look like cannot terminate, because prose has no edge. The clean
+  // comment's shape does: a headline, a reviewed-commit line, and Codex's
+  // collapsible `<details>` footer. Anything else in it means this is not
+  // that comment, whatever it says.
+  //
+  // Everything from `<details` on is Codex's boilerplate and is dropped
+  // before the shape is checked; what remains must be exactly two content
+  // lines.
+  const lines = text.split(/<details/i)[0]
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
+  if (lines.length !== 2) return null;
+
+  const headline = /^Codex Review:[ \t]*Didn['’]t find any major issues[.!](.*)$/.exec(lines[0]);
+  if (!headline) return null;
+  // The cheer is an allowlist, so an unrecognized one returns null and the
+  // gate waits for a reaction -- the degradation this function promises for
+  // wording it does not know. A new cheer costs one stalled gate and a
+  // one-line addition; guessing costs a merge that should not have happened.
+  if (!CLEAN_CHEERS.has(headline[1].trim())) return null;
+
+  const named = /^\**Reviewed commit:\**[ \t]*`?([0-9a-f]{7,40})`?$/i.exec(lines[1])?.[1];
+  if (!named) return null;
+  if (!head) return "other";
+  // The abbreviation is Codex's: it prints ten characters where the API
+  // gives forty, so compare by prefix in the direction that cannot collide
+  // -- the named id must be a prefix of the full head, never the reverse.
+  return String(head).toLowerCase().startsWith(named.toLowerCase()) ? "head" : "other";
+}
+
+export async function codexCommentSignals(api, { owner, name, number, since, head }) {
   let codexAt = null;
   let nudgeAt = null;
-  if (!since) return { codexAt, nudgeAt };
+  let cleanAt = null;
+  if (!since) return { codexAt, nudgeAt, cleanAt };
   // Both comment streams: top-level (`issues/…/comments`) and inline
   // review-thread replies (`pulls/…/comments`). A rebuttal-plus-nudge is
   // most naturally typed as a thread reply, and since the sweep is the sole
@@ -304,13 +380,14 @@ export async function codexCommentSignals(api, { owner, name, number, since }) {
       const batch = await api.rest(
         `/repos/${owner}/${name}/${stream}/${number}/comments?since=${encodeURIComponent(since)}&per_page=100&page=${page}`,
       );
-      const seen = commentSignals(batch, { since, owner });
+      const seen = commentSignals(batch, { since, owner, head });
       if (seen.codexAt !== null && (codexAt === null || seen.codexAt > codexAt)) codexAt = seen.codexAt;
       if (seen.nudgeAt !== null && (nudgeAt === null || seen.nudgeAt > nudgeAt)) nudgeAt = seen.nudgeAt;
+      if (seen.cleanAt !== null && (cleanAt === null || seen.cleanAt > cleanAt)) cleanAt = seen.cleanAt;
       if (!batch || batch.length < 100) break;
     }
   }
-  return { codexAt, nudgeAt };
+  return { codexAt, nudgeAt, cleanAt };
 }
 
 /**
@@ -809,6 +886,10 @@ export async function sweep({
     // read in progress settle without the walk; the `since` bound keeps it
     // to a page in practice.
     const undecided = !sharedHead && !held && !reading;
+    // Seeded from the reaction so the settle-without-the-walk paths below
+    // (shared head, hold, read in progress) carry the same value they always
+    // did; the walk can only add an attributable clean comment to it.
+    let cleanlyApproved = approved;
     let findings = false;
     let nudged = false;
     let nudgeAt = null;
@@ -832,13 +913,13 @@ export async function sweep({
       // and counting it settles the head so the loop stops watching.
       const walkSince = laterOf(earlierOf(bornAt, firstSeen), movedAt, retargetedAt);
       const signals = await codexCommentSignals(api, {
-        owner, name, number: node.number, since: walkSince,
+        owner, name, number: node.number, since: walkSince, head: node.headRefOid,
       });
       const codexAt = signals.codexAt;
       nudgeAt = signals.nudgeAt;
       // Codex's last word on this head, wherever it was said: a review, a
       // comment, or — for a clean pass, which leaves neither — the 👍.
-      const answeredAt = laterOf(reviewedAt, codexAt, approvedAt);
+      const answeredAt = laterOf(reviewedAt, codexAt, approvedAt, signals.cleanAt);
       // A nudge newer than Codex's last word reopens the wait: the answer
       // is due again, exactly as during a read — so the head counts as
       // awaiting and the clock runs. Deriving this from the comments on
@@ -850,10 +931,22 @@ export async function sweep({
       // be what leaves a success open — only an answer strictly newer than
       // the ask settles it.
       nudged = Boolean(nudgeAt) && (answeredAt === null || nudgeAt >= answeredAt);
-      findings = !approved && Boolean(answeredAt) && !nudged;
+      // An attributable clean comment approves this head exactly as the 👍
+      // does. It is ANDed with the same hold and nudge checks by sitting in
+      // `approved`, so a 👎, a 👀 or a newer nudge still outranks it.
+      // Only when it is Codex's LATEST word. A clean comment followed by a
+      // findings review on the same head -- an owner nudge is the ordinary
+      // way -- must not keep approving: the reaction can outrank findings
+      // because Codex re-adds it after a re-read, but a comment is a fixed
+      // point in time and has to be compared as one.
+      const answeredElsewhereAt = laterOf(reviewedAt, codexAt);
+      const cleanIsLatest = Boolean(signals.cleanAt)
+        && (answeredElsewhereAt === null || signals.cleanAt > answeredElsewhereAt);
+      cleanlyApproved = approved || cleanIsLatest;
+      findings = !cleanlyApproved && Boolean(answeredAt) && !nudged;
     }
     const verdict = verdictFor({
-      isDraft: false, approved, sharedHead, held, reading, findings, nudged,
+      isDraft: false, approved: cleanlyApproved, sharedHead, held, reading, findings, nudged,
     });
     const changed = await publish(api, { owner, name, pr: node, verdict, current: mine[0], log });
     if (changed) written.push({ number: node.number, ...verdict });
