@@ -164,11 +164,26 @@ export const laterOf = (...ts) => ts.filter(Boolean).sort().at(-1) ?? null;
  * The timestamp, not a boolean, because a nudge is only *pending* while it
  * is newer than Codex's last word — see the nudge note in `sweep`.
  */
-export function findingsOn(reviews, headRefOid) {
+export function findingsOn(reviews, headRefOid, since = null) {
   let at = null;
   for (const r of reviews ?? []) {
     if (!matchesBot(r.user?.login) || r.commit_id !== headRefOid) continue;
     const t = utc(r.submitted_at) ?? "";
+    // A review older than `since` read a different diff. The commit id ties
+    // a review to the head, which is enough while the head is the only
+    // thing that changes — but a RETARGET changes the diff underneath an
+    // unchanged head, so its own review records have to be dropped too.
+    // Leaving them in does not open the gate (findings hold it closed) but
+    // it settles the head as answered, which stops the minute loop and
+    // leaves a later clean 👍 — which emits no webhook — unseen until the
+    // hourly sweep.
+    //
+    // A TIE is stale. GitHub stamps to the second, so a review submitted in
+    // the same second as the retarget has no established order against it,
+    // and the ambiguity must not be what settles a head. The reaction and
+    // comment paths already require strictly newer (`at > bound`,
+    // `at <= bound` skips); this is the same rule.
+    if (since !== null && t <= since) continue;
     if (at === null || t > at) at = t;
   }
   return at;
@@ -188,13 +203,13 @@ export function findingsOn(reviews, headRefOid) {
  * extra calls; the 65-minute job timeout is the backstop against a paging
  * pathology, and an error escaping here ends the run red by design.
  */
-export async function codexReviewedAt(api, { owner, name, number, headRefOid }) {
+export async function codexReviewedAt(api, { owner, name, number, headRefOid, since = null }) {
   let at = null;
   for (let page = 1; ; page += 1) {
     const batch = await api.rest(
       `/repos/${owner}/${name}/pulls/${number}/reviews?per_page=100&page=${page}`,
     );
-    const t = findingsOn(batch, headRefOid);
+    const t = findingsOn(batch, headRefOid, since);
     if (t !== null && (at === null || t > at)) at = t;
     if (!batch || batch.length < 100) return at;
   }
@@ -366,8 +381,11 @@ query($owner:String!, $name:String!, $after:String) {
         isCrossRepository
         updatedAt
         commits(last:1) { nodes { commit { committedDate } } }
-        timelineItems(itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT], last:1) {
+        forcePushes: timelineItems(itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT], last:1) {
           nodes { ... on HeadRefForcePushedEvent { createdAt } }
+        }
+        retargets: timelineItems(itemTypes:[BASE_REF_CHANGED_EVENT], last:1) {
+          nodes { ... on BaseRefChangedEvent { createdAt } }
         }
         reactions(first:100) { ${PAGE} nodes { content createdAt user { login } } }
       }
@@ -689,8 +707,23 @@ export async function sweep({
     // is the silent merge of a commit nobody reviewed. No record GitHub
     // keeps is guaranteed to precede a fast-forward arrival, so there is
     // no sound earlier floor to prefer.
-    const movedAt = utc(node.timelineItems?.nodes?.[0]?.createdAt);
-    let bound = laterOf(firstSeen, movedAt);
+    const movedAt = utc(node.forcePushes?.nodes?.[0]?.createdAt);
+    // A RETARGET is the other way this PR becomes a different thing to
+    // review, and it is deliberately NOT `movedAt`. Pointing a PR at a new
+    // base changes the reviewed diff — sometimes completely — while the
+    // head SHA, its statuses and its check suites all stand still. Every
+    // other bound here is derived from the head, so without this floor a
+    // standing `codex: success` survives a base change and a diff nothing
+    // has read stays mergeable. GitHub stamps it as a BaseRefChangedEvent,
+    // so the moment is the server's rather than anything to persist here.
+    //
+    // Kept separate from `movedAt` because the suite machinery below reads
+    // that as "when the head ARRIVED", and a retarget pushes nothing: no
+    // new check suite is ever born for one. Feeding it in as a head
+    // arrival would make every retargeted head undatable forever — a gate
+    // that can never clear, which is worse than the hole it closes.
+    const retargetedAt = utc(node.retargets?.nodes?.[0]?.createdAt);
+    let bound = laterOf(firstSeen, movedAt, retargetedAt);
     // Don't read reactions when the shared head has already decided.
     let seen = sharedHead
       ? { approved: false, approvedAt: null, staleApproval: false, held: null, reading: false }
@@ -751,9 +784,14 @@ export async function sweep({
       // the bound and revive it. An undatable head gets no rescue: lowering
       // its bound with a foreign branch's suite is the same hole again.
       if (!undatable && !seen.approved && seen.staleApproval) {
+        // `retargetedAt` floors the rescue too. Without it the rescue is a
+        // way back under the retarget floor: a 👍 from before a base change
+        // is exactly a 👍 "rejected purely for freshness", so the rescue
+        // would lower the bound to a suite born before the retarget and
+        // revive an approval of the old diff.
         const better = laterOf(
           earlierOf(firstSeen, births.any),
-          laterOf(movedAt, births.forBranch),
+          laterOf(movedAt, retargetedAt, births.forBranch),
         );
         if (better !== null && (bound === null || better < bound)) {
           bound = better;
@@ -778,6 +816,7 @@ export async function sweep({
     if (undecided) {
       reviewedAt = await codexReviewedAt(api, {
         owner, name, number: node.number, headRefOid: node.headRefOid,
+        since: retargetedAt,
       });
       // The comment walk is bounded by the EARLIER of the head commit's own
       // date and the head's first server-stamped status — then floored at
@@ -788,7 +827,10 @@ export async function sweep({
       // left open for auto-merge. Taking the earlier of the two only ever
       // admits more — see `commentSignals`.
       const bornAt = utc(node.commits?.nodes?.[0]?.commit?.committedDate);
-      const walkSince = laterOf(earlierOf(bornAt, firstSeen), movedAt);
+      // Floored at the retarget for the same reason as the reviews above:
+      // a comment finding from before a base change describes the old diff,
+      // and counting it settles the head so the loop stops watching.
+      const walkSince = laterOf(earlierOf(bornAt, firstSeen), movedAt, retargetedAt);
       const signals = await codexCommentSignals(api, {
         owner, name, number: node.number, since: walkSince,
       });
