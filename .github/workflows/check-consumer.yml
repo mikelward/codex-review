@@ -20,10 +20,13 @@ name: check-consumer
 #
 # The check is Python because the one thing it cannot do by comparison -- read
 # a consumer's own ci.yml and answer whether any job can write commit statuses
-# -- needs a real YAML parser, and the runner ships PyYAML. That is not a
-# dependency taken on: this repository still has no package.json, no lockfile
-# and no install step, which is what lets a consumer trust an unpinned `@main`
-# by reading the files.
+# -- needs a real YAML parser. PyYAML is not a dependency taken on the way an
+# npm package would be: this repository still has no package.json, no
+# lockfile, and nothing a consumer installs to run the action. It IS installed
+# explicitly below rather than assumed present -- Microsoft's runner images
+# happen to ship it today, but nothing documents that as guaranteed the way
+# python3 itself is, and every consumer's merge gate depends on this step
+# succeeding.
 
 on:
   workflow_call:
@@ -34,14 +37,36 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  # Named to match the caller's job id, not left as a generic `check`: GitHub
+  # reports a reusable-workflow job's required-status context as
+  # `<calling job> / <called job>`, so a generic id on either side makes the
+  # branch-protection search box show an ambiguous "check / check" rather
+  # than something a consumer can find by searching this action's own name.
+  codex-review-check:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      # The caller's repository. In a reusable workflow this is what
-      # `actions/checkout` takes by default.
+      # The caller's repository, at the revision under review.
+      #
+      # The caller's own trigger is `pull_request_target` rather than
+      # `pull_request`: for a PR that edits `codex-review-check.yml` itself, a
+      # bare `pull_request` would load the JOB DEFINITION from the PR's merge
+      # ref, so the PR could replace the call to this reusable workflow with a
+      # local job that always succeeds and merge past a red or deleted check.
+      # `pull_request_target` loads the definition from the default branch, so
+      # the workflow that runs is never the one a PR supplies.
+      #
+      # That flips `actions/checkout`'s default the other way: under
+      # `pull_request_target` it checks out the BASE ref, not the PR's head,
+      # which would validate the old files and never see what the PR changes.
+      # The fix is the opposite of the usual `pull_request_target` caution --
+      # this step checks out the untrusted head explicitly, but only ever
+      # reads it as data (`check_consumer.py` parses text, nothing here
+      # executes anything from the caller's tree), which is what makes doing
+      # so safe. `github.sha` covers `push`, the other trigger this runs on.
       - uses: actions/checkout@v5
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       # This repository, for the checker itself. `@main` matches how consumers
@@ -55,7 +80,12 @@ jobs:
           path: .codex-review
           persist-credentials: false
 
-      # No install step, because there is nothing to install: python3 and
-      # PyYAML are both on the runner image.
+      # Unpinned, matching how this repository itself takes PyYAML (see
+      # check_consumer.py's docstring): the same trust that covers an
+      # unpinned `@main` reference covers an unpinned release of a library
+      # with a stable, narrow surface (`yaml.safe_load`) read from PyPI.
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet --user pyyaml
+
       - name: Check the consumer's codex-review setup
         run: python3 .codex-review/check_consumer.py .

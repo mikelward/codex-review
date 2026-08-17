@@ -96,17 +96,17 @@ languages -- which is what the hand-written copies it replaced cost:
 name: codex-review-check
 on:
   push:
-  pull_request:
+  pull_request_target:
 permissions:
   contents: read
 jobs:
-  check:
+  codex-review-check:
     uses: mikelward/codex-review/.github/workflows/check-consumer.yml@main
 ```
 
 Why each setting is what it is -- the two triggers that must never appear, why
 the relay is a separate file, why `sweep` must not be a required check, and the
-two ruleset settings that are load-bearing together -- is in
+three ruleset settings that are load-bearing together -- is in
 [docs/CONSUMER.md](docs/CONSUMER.md).
 
 Then add `codex` to the required status checks for your default branch. Until
