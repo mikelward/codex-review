@@ -88,8 +88,16 @@ has stopped biting.
   of them. Take one consumer through review, and only copy it out once that
   has settled.
   The pre-merge pilot is THIS repository, which is its own first consumer:
-  it installs all three files and `check_consumer.py` holds it to the same
-  comparison, so the change is exercised before it can reach anyone else.
+  it installs the sweep and the listener, `check_consumer.py` holds them to
+  the same comparison, and `scripts/check-consumers.sh` then runs the revision
+  under review against every real consumer tree — so a change is exercised
+  before it can reach anyone. It does **not** install the caller, and that is
+  deliberate rather than an omission: a caller here would name the reusable
+  workflow at `@main`, the *released* one, so a pull request changing the
+  checker or a template would be validated against the previous release and
+  never exercise its own change. `is_hub` exempts it for that reason. What
+  covers the caller instead is the suite, which builds a consumer from the
+  real templates and runs the whole checker over it, parser included.
   Piloting a second consumer by pointing its caller at the branch does not
   work and should not be attempted -- the caller is pinned byte for byte to a
   template that says `@main`, so a branch reference is reported as drift,

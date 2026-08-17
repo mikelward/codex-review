@@ -16,13 +16,14 @@ consumer that drifts goes red rather than quietly stopping working.
 
 `.github/workflows/codex-review-listener.yml` — the unprivileged relay.
 
-`.github/workflows/codex-review-check.yml` — eight lines that run this check:
+`.github/workflows/codex-review-check.yml` — nine lines that run this check:
 
 ```yaml
 name: codex-review-check
 on:
   push:
   pull_request_target:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -41,6 +42,32 @@ takes the definition from the default branch, so the workflow that runs is
 never the one the PR supplies; `check-consumer.yml` then checks out the PR's
 head explicitly to read it as data, which is safe because nothing in the
 check executes anything from the tree it reads.
+
+`workflow_dispatch` is there for the pull requests **a bot opens**. A pull
+request created by `GITHUB_TOKEN` triggers no `on: pull_request`-family
+workflow — GitHub's loop-prevention rule, with no per-repository opt-out short
+of a PAT — and that suppresses the branch `push` as well. So on a repository
+with an unattended job opening pull requests (a weekly dependency batch, say)
+this check would have no run at all on that head, and requiring it would block
+those merges forever. Dispatch is the documented exception: a dispatch made
+with `GITHUB_TOKEN` *does* create a run. Ask for one against the branch you
+just pushed, and its check run lands on the head like any other:
+
+```sh
+gh workflow run codex-review-check.yml --ref "$branch"
+```
+
+The job doing that needs `actions: write`, and the workflow must carry
+`workflow_dispatch` **on your default branch** — a workflow GitHub cannot see
+there is not dispatchable, however the branch under test spells it.
+
+Note that the sweep deliberately does **not** take this trigger, and the
+difference is the token. Dispatch runs the workflow file *from the given ref*,
+so a branch could ship its own version of the job — and the sweep's job holds
+`statuses: write`, which is the capability that opens the gate. This caller
+holds `contents: read` and nothing else, and its definition is already the
+branch's own by way of `push`, so dispatch hands a branch nothing it did not
+already have.
 
 Then set the ruleset — see [Three ruleset settings](#three-ruleset-settings-and-they-are-load-bearing-together)
 below. Until you do, the status is published and ignored and these files are
@@ -328,19 +355,28 @@ to the shared reusable workflow with a job of the same name that always
 succeeds — defeating, for fork pull requests specifically, the check whose
 entire purpose is to detect exactly that edit.
 
-## Known limitation: the head's `codex-review-check` comes from `push`
+## Known limitation: the head's `codex-review-check` is branch-defined
 
 The same mechanism as above, seen from the other side, and it is the sharper
 of the two because it applies to the same-repository pull requests these
 repositories actually take.
 
-`codex-review-check.yml` has two triggers. The `pull_request_target` one is
-trusted — its definition comes from the default branch — but it does not
-report on the pull request's head. The run that *does* land on the head is the
-**`push`** one, and a `push` workflow's definition comes from the pushed
-branch: the pull request's own. Verified rather than reasoned about — on
+`codex-review-check.yml` has three triggers, and only one of them is trusted.
+`pull_request_target` takes its definition from the default branch — but it
+does not report on the pull request's head, so it cannot satisfy the required
+context there. The two runs that *do* land on the head are **`push`** and
+**`workflow_dispatch`**, and both take the workflow definition from the branch:
+the pull request's own. Verified rather than reasoned about — on
 `mikelward/root#44`, the check run carrying the head SHA belongs to a run with
 `event: push` and `path: .github/workflows/codex-review-check.yml`.
+
+`workflow_dispatch` is the newer of the two and it is the one a bot-authored
+pull request relies on (see [the caller](#the-three-files) above), so on those
+repositories it is the *only* route to a head-associated run. It is no weaker
+than `push` and no stronger: a dispatch names a ref and GitHub runs that ref's
+copy of the file, which is exactly what `push` already does. Adding it widened
+nothing — but it does mean "the head's check comes from `push`" is no longer
+the whole story, and a reader checking provenance should expect either.
 
 So a same-repository pull request can edit that file to declare a job named
 `codex-review-check` calling something other than the shared checker, and the
