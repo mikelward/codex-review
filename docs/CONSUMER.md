@@ -387,6 +387,42 @@ file mean" but "is this the file". That is also why the reasoning lives in this
 document rather than in a header — a header you could edit is a file that can
 drift, and the comparison is exact.
 
+### When a template changes: `notice:` is your cue, not an error
+
+"The shipped ones" is a small **set**, not one file, and that is what lets a
+template change reach you without breaking you.
+
+The pin compares against `templates/` at `@main`, and you track `@main` — so a
+template edit would mismatch every consumer at the instant it merged, all of
+them red at once through no change of their own. Instead, the edit puts the
+outgoing file in `templates/superseded/<label>/` in the same commit. Your
+unchanged repository still matches something exact, so your check stays green
+and you get a line like:
+
+```
+notice: codex-review-check.yml matches the superseded shape `push-only` rather
+than the current template — migrate it by copying templates/ from
+mikelward/codex-review; the shape is accepted only until the last consumer has
+moved
+```
+
+That is the whole protocol: **green, with a standing reminder.** Copy the three
+files from `templates/` when it suits you and the notice goes away. It is a
+notice rather than an error because a repository mid-migration is correct — it
+just has not moved yet — and it is printed rather than silent because a
+migration nobody can see is how "accepted for now" becomes permanent.
+
+Three things it is not. It is not a relaxation: every accepted shape is still an
+exact match against files in this repository, so a locally edited workflow fails
+exactly as before. It is not per-file, either — a shape is **all three files as
+they were shipped together**, and matched as one, so holding an old file beside
+current versions of the others is refused however genuine each half is. That
+matters for these three in particular: the sweep names the listener in its
+`workflow_run` trigger, so a mixed pair is broken rather than merely old. And it
+is not open-ended — the superseded directory is deleted once the last consumer
+has moved, and from then on that shape is an error like any other drift. So a
+notice is worth acting on rather than living with.
+
 **Can any other workflow write commit statuses?** Your `ci.yml`, `release.yml`
 and the rest differ per repository, so they cannot be pinned, and this is the
 one place a workflow has to be *understood*. It is parsed with PyYAML.

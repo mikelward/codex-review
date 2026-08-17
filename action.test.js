@@ -279,6 +279,31 @@ describe("action.yml", () => {
     expect(section).toMatch(/Do not fix it with a plain `pull_request` trigger/);
   });
 
+  it("documents the template-migration mechanism a consumer will meet", () => {
+    // A consumer's first contact with this is a `notice:` line on a check
+    // that is otherwise green. Undocumented, it reads as either a failure to
+    // panic about or noise to ignore -- and the second is how a migration
+    // stops finishing. Pinned because it is prose whose whole value is being
+    // there on the day it is needed.
+    const doc = readFileSync("docs/CONSUMER.md", "utf8");
+    // Ends at the next `##` heading OR at end of file -- this section is
+    // currently the last one, so anchoring only on a following heading would
+    // find nothing and make every assertion below vacuous.
+    const section = doc.match(/### When a template changes[\s\S]*?(?=\n## |$)/)?.[0];
+    expect(typeof section).toBe("string");
+    // What the reader sees, and that it does not mean they are broken.
+    expect(section).toMatch(/notice:/);
+    expect(section).toMatch(/green/);
+    // Where the outgoing shape lives, and what to do about it.
+    expect(section).toMatch(/templates\/superseded/);
+    // The three bounds that keep "accepted for now" from becoming permanent
+    // or from widening into a hole. The middle one is the sharp one: a shape
+    // is matched whole, so an old file beside current ones is refused.
+    expect(section).toMatch(/not a relaxation/);
+    expect(section).toMatch(/all three files as\s+they were shipped together/);
+    expect(section).toMatch(/deleted once the last consumer\s+has moved/);
+  });
+
   it("documents that the head's check comes from the PR's own push", () => {
     // The sharper of the two limitations, because it applies to the
     // same-repository pull requests these repositories actually take: the

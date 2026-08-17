@@ -65,6 +65,22 @@ has stopped biting.
   `root`, `scripts`, `unixtools`, `vcs`, `web`. A change to the action's
   inputs, its published wording, or `templates/` needs their workflows
   checked, even though none of them has to be edited for an ordinary fix.
+- **Changing a `templates/` file is a migration, and it has a mechanism —
+  use it.** The pin is byte for byte against `@main`, so an edited template
+  mismatches every consumer the instant it merges, while `check-consumers.sh`
+  checks real consumer trees against the revision under review — the edit is
+  red before it can merge, and the consumers cannot be fixed until it has.
+  That deadlock is why `templates/superseded/<label>/` exists: put the
+  outgoing files there in the same commit that changes the template, and
+  nothing goes red. Consumers then migrate one at a time, each reported by a
+  `notice:` line until it moves, and **deleting the directory is what ends the
+  migration** — leave it and the pin quietly accepts two shapes forever. Only
+  ever offer a shape this repository actually shipped; the set is exact
+  matches, not a relaxation. A label holds **all three files**, not just the
+  one that changed, and is matched whole — storing only the delta would accept
+  an old file beside current versions of the others, which is a combination
+  nobody shipped and, for the sweep and listener, a broken relay rather than an
+  old one. An incomplete label fails the check by name.
 - **Pilot ONE consumer, and pilot it BEFORE the merge.** Never open the same
   change across the consumers at once. They share one automated reviewer, so a
   finding against a change made nine times is the same finding nine times --
