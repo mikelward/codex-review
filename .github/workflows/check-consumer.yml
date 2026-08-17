@@ -20,13 +20,10 @@ name: check-consumer
 #
 # The check is Python because the one thing it cannot do by comparison -- read
 # a consumer's own ci.yml and answer whether any job can write commit statuses
-# -- needs a real YAML parser. PyYAML is not a dependency taken on the way an
-# npm package would be: this repository still has no package.json, no
-# lockfile, and nothing a consumer installs to run the action. It IS installed
-# explicitly below rather than assumed present -- Microsoft's runner images
-# happen to ship it today, but nothing documents that as guaranteed the way
-# python3 itself is, and every consumer's merge gate depends on this step
-# succeeding.
+# -- needs a real YAML parser. PyYAML is taken from the runner image, not
+# installed: this repository has no package.json, no lockfile, no install
+# step, and nothing is fetched while a consumer's merge gate is waiting.
+# See the step below for what that trades away and why it is the safe side.
 
 on:
   workflow_call:
@@ -80,12 +77,20 @@ jobs:
           path: .codex-review
           persist-credentials: false
 
-      # Unpinned, matching how this repository itself takes PyYAML (see
-      # check_consumer.py's docstring): the same trust that covers an
-      # unpinned `@main` reference covers an unpinned release of a library
-      # with a stable, narrow surface (`yaml.safe_load`) read from PyPI.
-      - name: Install PyYAML
-        run: python3 -m pip install --quiet --user pyyaml
-
+      # No install step, deliberately. PyYAML is taken from the runner image
+      # the way python3, git and bash are -- nothing is fetched at gate time.
+      #
+      # Installing it explicitly was tried and reverted. It put PyPI on the
+      # critical path of nine repositories' merge gates, so a registry
+      # outage stalls every consumer, and an unpinned `pip install` takes
+      # whatever release is newest, so a parser regression could change a
+      # verdict with no change in any repository. Pinning instead trades
+      # that for a version to bump in lockstep -- the maintenance cost
+      # centralizing this was meant to remove.
+      #
+      # The risk this leaves is the image dropping PyYAML, and it fails
+      # CLOSED: check_consumer.py catches the ImportError and exits non-zero
+      # with the reason, so the gate goes red and says why. Loud and
+      # recoverable beats a dependency that can go wrong quietly.
       - name: Check the consumer's codex-review setup
         run: python3 .codex-review/check_consumer.py .

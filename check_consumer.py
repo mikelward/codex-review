@@ -54,10 +54,15 @@ from pathlib import Path
 try:
     import yaml
 except ImportError:  # pragma: no cover - the message is the behavior
+    # Fails CLOSED, and that is what makes taking PyYAML from the runner
+    # image acceptable rather than reckless: nothing is fetched at gate time,
+    # and if the image ever stops shipping it, every consumer's check goes
+    # red saying exactly this instead of passing without having parsed
+    # anything. See .github/workflows/check-consumer.yml.
     sys.exit(
-        "error: this check needs PyYAML.\n"
-        "  python3 -m pip install --user pyyaml\n"
-        "GitHub's runner images ship it; a bare machine may not."
+        "error: this check needs PyYAML, and this machine has no yaml module.\n"
+        "  GitHub's runner images supply it; CI installs nothing on purpose.\n"
+        "  On a bare machine: python3 -m pip install --user pyyaml"
     )
 
 HERE = Path(__file__).resolve().parent
