@@ -127,6 +127,32 @@ class TheSoleWriterScan(ConsumerCase):
         bad = CI.replace("permissions:\n  contents: read", "permissions: write-all")
         self.assertProblem(self.check(ci_yml=bad), "ci.yml can write commit statuses")
 
+    def test_refuses_duplicate_mapping_keys_rather_than_judging_the_last(self):
+        # PyYAML's default keeps the LAST duplicate key, so a file carrying
+        # two permissions blocks — statuses: write first, benign second —
+        # would be judged only on the second. GitHub rejects such a file
+        # today, but that safety belongs to this check, not to GitHub's
+        # parser staying strict.
+        bad = CI.replace(
+            "permissions:\n  contents: read",
+            "permissions:\n  statuses: write\npermissions:\n  contents: read",
+        )
+        self.assertProblem(self.check(ci_yml=bad), "could not be parsed")
+        self.assertProblem(self.check(ci_yml=bad), "duplicate mapping key")
+
+    def test_does_not_confuse_distinct_yaml_1_2_keys_coerced_alike_under_1_1(self):
+        # PyYAML implements YAML 1.1, where `on`, `On`, `yes`, and `y` all
+        # resolve to the Python boolean True — but GitHub's own parser is
+        # closer to 1.2 and reads each as a distinct string. A workflow with
+        # a top-level `on:` and an unrelated `yes:` key elsewhere is valid
+        # and unambiguous on GitHub's side; the duplicate-key guard must not
+        # report it as a collision that does not exist there.
+        good = CI.replace(
+            "on:\n  pull_request:",
+            "on:\n  pull_request:\nyes: recorded so the parser sees the key, unused otherwise",
+        )
+        self.assertEqual(self.check(ci_yml=good), [])
+
     def test_catches_a_quoted_key(self):
         # `"permissions":` — the same key to YAML, invisible to a pattern
         # anchored on the bare spelling. Found by review against a consumer.
@@ -454,7 +480,10 @@ class SupersededShapes(ConsumerCase):
 
     def setUp(self):
         self.old_caller = check_consumer.template(CALLER)
-        self.new_caller = self.old_caller.replace("on:\n", "on:\n  workflow_dispatch:\n")
+        # A VALID rewrite: the current template already carries
+        # workflow_dispatch, and inserting a duplicate key would now be a
+        # parse refusal rather than a shape change.
+        self.new_caller = self.old_caller.replace("on:\n", "on:\n  merge_group:\n")
         self.sweep = check_consumer.template(SWEEP)
         self.listener = check_consumer.template(LISTENER)
         # A rewrite that changed nothing would make every case below vacuous.
