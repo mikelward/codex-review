@@ -336,9 +336,19 @@ class TheTemplatesThemselves(unittest.TestCase):
         caller = yaml.safe_load(check_consumer.template(CALLER))
         self.assertEqual(caller["permissions"], {"contents": "read"})
         self.assertEqual(
-            caller["jobs"]["check"]["uses"],
+            caller["jobs"]["codex-review-check"]["uses"],
             "mikelward/codex-review/.github/workflows/check-consumer.yml@main",
         )
+
+    def test_the_caller_loads_its_definition_from_the_default_branch(self):
+        # A bare `pull_request` would load the JOB DEFINITION from the PR's
+        # merge ref, so a PR editing this file could replace the call to
+        # check-consumer.yml with one that always succeeds -- the same hole
+        # `pull_request_target` closes for the sweep, here on the file whose
+        # whole purpose is to reject exactly that kind of edit.
+        caller = yaml.safe_load(check_consumer.template(CALLER))
+        self.assertIn("pull_request_target", caller[True])
+        self.assertNotIn("pull_request", caller[True])
 
 
 class TheHubExemption(ConsumerCase):

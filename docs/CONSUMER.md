@@ -22,13 +22,25 @@ consumer that drifts goes red rather than quietly stopping working.
 name: codex-review-check
 on:
   push:
-  pull_request:
+  pull_request_target:
 permissions:
   contents: read
 jobs:
-  check:
+  codex-review-check:
     uses: mikelward/codex-review/.github/workflows/check-consumer.yml@main
 ```
+
+`pull_request_target` here for the same reason as the sweep, but protecting a
+different target: this is the file that verifies nobody edited the pinned
+workflows, so it is exactly the file a PR editing them would most want to
+neuter. A bare `pull_request` loads the job DEFINITION from the PR's merge
+ref — a PR touching `codex-review-check.yml` could replace the call to the
+shared reusable workflow with a local job that always succeeds, and merge
+past a check that reads green but checked nothing. `pull_request_target`
+takes the definition from the default branch, so the workflow that runs is
+never the one the PR supplies; `check-consumer.yml` then checks out the PR's
+head explicitly to read it as data, which is safe because nothing in the
+check executes anything from the tree it reads.
 
 Then set the ruleset — see [Three ruleset settings](#three-ruleset-settings-and-they-are-load-bearing-together)
 below. Until you do, the status is published and ignored and these files are
@@ -185,13 +197,19 @@ Neither can be expressed in a workflow file.
 
 1. **Require `codex`.** Until you do, the status is published and ignored. Do
    *not* require `sweep` — see above.
-1. **Require `codex-review-check`.** This is the check that holds the three
-   files above to their templates and proves no other workflow can write the
-   `codex` status. Left advisory, it reports a problem that nothing acts on: a
-   pull request could edit or delete the pinned workflows — including the one
-   that publishes the verdict — and merge with this check red or absent,
-   leaving the gate quietly misconfigured. A check nobody requires is a
-   comment.
+1. **Require `codex-review-check / codex-review-check`.** GitHub reports a
+   reusable-workflow job's status under `<calling job> / <called job>`, and
+   both halves are named `codex-review-check` for exactly this reason —
+   search "codex-review-check" in the required-checks box and there is one
+   match, not a generic `check` that could be any workflow's job. It only
+   appears in that search once the workflow has reported at least once, so
+   run it (push, or open a pull request) before adding it. This is the check
+   that holds the three files above to their templates and proves no other
+   workflow can write the `codex` status. Left advisory, it reports a problem
+   that nothing acts on: a pull request could edit or delete the pinned
+   workflows — including the one that publishes the verdict — and merge with
+   this check red or absent, leaving the gate quietly misconfigured. A check
+   nobody requires is a comment.
 2. **Require branches to be up to date before merging.** Codex's verdict is
    derived from its reaction to the pull request, and the action never reads
    the pull request's base at all. So when the base advances, the reviewed

@@ -78,8 +78,13 @@ jobs:
       - name: Test
         run: node --test *.test.js
 
-      # The consumer check is Python, so its suite is too -- stdlib unittest,
-      # no packages, in a repository that ships no dependencies.
+      # The consumer check's own suite is stdlib unittest, no packages -- but
+      # check_consumer.py itself imports PyYAML, and this job cannot assume
+      # the runner image ships it (see check-consumer.yml). Installed once,
+      # ahead of every step below that runs the checker.
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet --user pyyaml
+
       - name: Test the consumer check
         run: python3 -m unittest check_consumer_test -v
 
