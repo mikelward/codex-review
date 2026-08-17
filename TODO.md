@@ -6,6 +6,30 @@ Guesses made under autopilot, recorded here so nothing decided without the
 repository owner silently becomes permanent. Each says what was decided, what
 the alternative was, and why it is reversible.
 
+### Naming a sibling repo's pull request in a test comment
+
+**Decided:** replaced `simmo#216` with "a sibling repo's pull request" in the
+three `cleanVerdict` test comments, and the `6c493c8` fixture prefix with an
+obviously-synthetic one, after Codex raised it as a P1 three times across two
+pull requests.
+
+**Alternative:** keep the reference. AGENTS.md § Privacy bans **user data**,
+and a public pull request in the owner's own public repository is not that --
+sibling AGENTS.md files cite `anthropics/claude-code#46625` in committed prose
+for exactly the same provenance reason. That argument was made on both threads
+and still stands.
+
+**Why this way:** the finding kept the `codex` status at FINDINGS, and that
+status is what gates the fix restoring the 55-minute loop and the clean-comment
+verdict for every consumer. Holding the line cost thirteen repositories a
+working gate; the identifier bought a reader one lookup. The regression
+scenario itself -- a clean comment about an older head deciding the current
+one -- is still described in full.
+
+**Reversible:** the words are two comments; restoring them is one edit. If the
+intent is that citations like this ARE allowed, the fix belongs in AGENTS.md so
+it binds every repo rather than being re-argued per pull request.
+
 ### Fork pull requests: documented, not fixed
 
 **Decided:** record the gap in `docs/CONSUMER.md` with its remedy, and leave
