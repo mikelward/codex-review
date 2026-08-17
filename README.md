@@ -86,7 +86,7 @@ jobs:
       - run: 'true'
 ```
 
-And, as `codex-review-check.yml`, the eight lines that verify all three stay
+And, as `codex-review-check.yml`, the nine lines that verify all three stay
 correct. Everything it knows lives in
 [`check_consumer.py`](check_consumer.py) here, so a fix reaches every
 consumer at once instead of being hand-carried into nine repositories in four
@@ -97,6 +97,7 @@ name: codex-review-check
 on:
   push:
   pull_request_target:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:

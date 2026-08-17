@@ -279,6 +279,86 @@ describe("action.yml", () => {
     expect(section).toMatch(/Do not fix it with a plain `pull_request` trigger/);
   });
 
+  it("sweeps every sibling AGENTS.md names, with neither list hard-coded twice", () => {
+    // `check-consumers.sh` stopped being a sample of three and now names every
+    // SIBLING, which moves its failure mode: an omitted or misspelled
+    // repository is never visited, so the run reports success having skipped
+    // it silently. That is the false pass this suite exists for.
+    //
+    // It is not a registry of everyone using the action -- this one is public
+    // and unpinned, so an outside adopter never appears here and is served by
+    // running the check in their own CI. What this asserts is only that the
+    // siblings AGENTS.md claims responsibility for are the ones actually swept.
+    //
+    // Derived from AGENTS.md rather than pinned to a second copy of the nine
+    // names, so drift in EITHER file is caught and neither can be the one that
+    // quietly becomes wrong.
+    const agents = readFileSync("AGENTS.md", "utf8");
+    const sweep = readFileSync("scripts/check-consumers.sh", "utf8");
+
+    const named = agents
+      .match(/Nine sibling repositories consume this:([\s\S]*?)\. A change/)?.[1]
+      ?.match(/`([a-z-]+)`/g)
+      ?.map((m) => m.slice(1, -1));
+    const listed = sweep.match(/^CONSUMERS="([^"]+)"$/m)?.[1]?.split(" ");
+
+    // Both regexes before either comparison: a set difference against an empty
+    // set is empty, so a reindented AGENTS.md bullet or a requoted CONSUMERS
+    // line would turn the assertion below green while checking nothing.
+    expect(named?.length).toBe(9);
+    expect(listed?.length).toBe(9);
+    expect([...named].sort()).toEqual([...listed].sort());
+  });
+
+  it("makes the consumer check dispatchable, and records the shape it replaced", () => {
+    // `workflow_dispatch` is here for one reason: a pull request created by
+    // GITHUB_TOKEN triggers neither `push` nor `pull_request_target` --
+    // GitHub's loop-prevention rule -- so a repository whose dependency
+    // updates are opened by a bot would have no run of this check on that
+    // head at all, and requiring it would block those merges forever.
+    // Dispatch is the documented exception: a dispatch made with
+    // GITHUB_TOKEN does create a run.
+    const caller = template("codex-review-check.yml");
+    expect(caller).toMatch(/^ {2}workflow_dispatch:$/m);
+    // Safe here in a way it is not on the sweep, which omits it deliberately:
+    // dispatch runs the workflow file FROM THE GIVEN REF, and the sweep holds
+    // `statuses: write`. This caller holds `contents: read` and nothing else,
+    // and its definition is already the branch's own by way of `push`, so
+    // dispatch adds no capability a branch did not have.
+    expect(caller).toMatch(/permissions:\n {2}contents: read\n/);
+    expect(caller).not.toMatch(/statuses:/);
+
+    // And the migration this created, recorded whole. Every file, because a
+    // shape is matched as a set -- an incomplete label fails by name.
+    const shape = "templates/superseded/push-only";
+    for (const name of TEMPLATES) {
+      expect(existsSync(`${shape}/${name}`)).toBe(true);
+    }
+    // The outgoing caller is the current one minus the new trigger. Asserted
+    // rather than assumed: a superseded copy identical to the current one
+    // would be a migration that migrates nothing, and every consumer would
+    // read as current while nothing had moved.
+    const outgoing = readFileSync(`${shape}/codex-review-check.yml`, "utf8");
+    expect(outgoing).not.toMatch(/workflow_dispatch/);
+    expect(outgoing === caller).toBe(false);
+    // The other two are unchanged by this migration, which is what makes the
+    // label a snapshot rather than an edit.
+    expect(readFileSync(`${shape}/codex-review.yml`, "utf8")).toBe(template("codex-review.yml"));
+    expect(readFileSync(`${shape}/codex-review-listener.yml`, "utf8")).toBe(
+      template("codex-review-listener.yml"),
+    );
+
+    // And the reason, written where a consumer meets it. A trigger nobody can
+    // explain is one a later tidy-up removes, and removing this one blocks
+    // every bot-authored pull request the day the check is required.
+    const doc = readFileSync("docs/CONSUMER.md", "utf8");
+    expect(doc).toMatch(/GITHUB_TOKEN` triggers no `on: pull_request`/);
+    expect(doc).toMatch(/gh workflow run codex-review-check\.yml/);
+    expect(doc).toMatch(/actions: write/);
+    // Including the asymmetry with the sweep, which must not take it.
+    expect(doc).toMatch(/the sweep deliberately does \*\*not\*\* take this trigger/);
+  });
+
   it("documents the template-migration mechanism a consumer will meet", () => {
     // A consumer's first contact with this is a `notice:` line on a check
     // that is otherwise green. Undocumented, it reads as either a failure to
@@ -316,6 +396,12 @@ describe("action.yml", () => {
     // The mechanism, and that it was observed rather than reasoned out.
     expect(section).toMatch(/`push`/);
     expect(section).toMatch(/event: push/);
+    // BOTH branch-defined routes. `workflow_dispatch` was added later and is
+    // the only head-associated run a bot-authored pull request gets, so a
+    // section naming only `push` sends a reader checking provenance to the
+    // wrong place -- and reads as though dispatch were a third, safer route.
+    expect(section).toMatch(/workflow_dispatch/);
+    expect(section).toMatch(/no weaker\s+than `push` and no stronger/);
     // The remedy is a ruleset setting naming a workflow, not a context.
     expect(section).toMatch(/Require workflows to pass before merging/);
     expect(section).toMatch(/check-consumer\.yml@main/);

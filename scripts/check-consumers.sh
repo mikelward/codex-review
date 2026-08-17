@@ -14,16 +14,26 @@
 # "does the change under review still accept the nine repositories as they are
 # today".
 #
-# The list is a SAMPLE, not an enumeration. There are more consumers than
-# these, and more repositories that may adopt the check later, so a list
-# claiming to be complete would be wrong the first time one did -- and wrong
-# silently, since nothing here could notice a repository it does not name.
-# What this job is for is meeting real consumer trees before a change can
-# reach them, and three of them do that as well as nine: they are ordinary
-# repositories, not fixtures, and they differ from each other in the ways that
-# matter (one with no CI of its own, one with a matrix, one with several
-# workflows). Add to it when a repository would exercise something the others
-# do not.
+# The list is every consumer THIS REPOSITORY KNOWS OF, which is not the same as
+# every consumer and must not be mistaken for it. This action is public and
+# unpinned, so anyone can adopt it without appearing here, and nothing in this
+# job could notice a repository it does not name. A list claiming completeness
+# would be wrong the first time someone did, and wrong silently.
+#
+# What it IS, is the set of trees this job checks, and it grew from a sample of
+# three for two reasons. AGENTS.md requires a templates/ change to have every
+# sibling's workflows checked, and a sample cannot answer that. And the notices
+# turn the run into a migration's progress bar: with every known consumer
+# named, one run says which are still on the outgoing shape, where a sample
+# would say "some of them are fine" and leave the rest tracked by hand.
+#
+# It goes stale in the safe direction: a repository named here but not yet
+# converted is a printed skip, not a failure. The one silent case is a
+# repository this job never hears about -- which is why adding a sibling here
+# belongs in the same change that gives it the workflows, and why an outside
+# adopter is served by running the check in their own CI rather than by being
+# added to this list. The clone below assumes the sibling owner, so this list
+# is for the siblings; it is not a registry.
 #
 # A repository that has not adopted the check yet is SKIPPED, with its name
 # printed. Adoption is one repository at a time by design (see AGENTS.md), so
@@ -37,8 +47,11 @@
 
 set -eu
 
-# The first three adoption waves, in order (AGENTS.md).
-CONSUMERS="scripts vcs conf"
+# The sibling repositories named in AGENTS.md, in adoption order. Bare names:
+# the clone below supplies the owner, so this list cannot express an outside
+# adopter -- deliberately, since it is the siblings this repository is
+# responsible for checking, not a registry of everyone using the action.
+CONSUMERS="scripts vcs conf unixtools root mesh web gedmap lanes"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 SIBLINGS="${1:-}"
 
