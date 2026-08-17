@@ -153,6 +153,22 @@ export const earlierOf = (...ts) => ts.filter(Boolean).sort()[0] ?? null;
 export const laterOf = (...ts) => ts.filter(Boolean).sort().at(-1) ?? null;
 
 /**
+ * The newest `createdAt` in a timeline connection, or null.
+ *
+ * Reads the whole page rather than `nodes[0]`, and that is the entire point:
+ * a GraphQL connection comes back **oldest-first**, so `nodes[0]` of a
+ * `last:N` window is the Nth-most-recent event, not the newest. Today every
+ * caller asks for `last:1`, where the two are the same and nothing can go
+ * wrong — which is exactly why the hazard is worth removing rather than
+ * commenting on. Raising a bound to `last:10` for a good reason (a busy pull
+ * request evicting the event you wanted) would otherwise floor the verdict on
+ * the oldest of ten force-pushes, silently, in the safe-looking direction of
+ * a bound that is too low.
+ */
+export const newestIn = (connection) =>
+  laterOf(...(connection?.nodes ?? []).map((n) => utc(n?.createdAt)));
+
+/**
  * The newest Codex review of exactly this head in a REST batch, or null.
  *
  * The review's own commit id is the tie to the head, so no time guard is
@@ -707,7 +723,7 @@ export async function sweep({
     // is the silent merge of a commit nobody reviewed. No record GitHub
     // keeps is guaranteed to precede a fast-forward arrival, so there is
     // no sound earlier floor to prefer.
-    const movedAt = utc(node.forcePushes?.nodes?.[0]?.createdAt);
+    const movedAt = newestIn(node.forcePushes);
     // A RETARGET is the other way this PR becomes a different thing to
     // review, and it is deliberately NOT `movedAt`. Pointing a PR at a new
     // base changes the reviewed diff — sometimes completely — while the
@@ -722,7 +738,7 @@ export async function sweep({
     // new check suite is ever born for one. Feeding it in as a head
     // arrival would make every retargeted head undatable forever — a gate
     // that can never clear, which is worse than the hole it closes.
-    const retargetedAt = utc(node.retargets?.nodes?.[0]?.createdAt);
+    const retargetedAt = newestIn(node.retargets);
     let bound = laterOf(firstSeen, movedAt, retargetedAt);
     // Don't read reactions when the shared head has already decided.
     let seen = sharedHead

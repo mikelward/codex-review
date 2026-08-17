@@ -15,6 +15,7 @@ import {
   UNREADABLE,
   MAX_FAIL_STREAK,
   utc,
+  newestIn,
 } from "./codex-review.mjs";
 
 describe("verdictFor", () => {
@@ -271,6 +272,29 @@ describe("commentSignals", () => {
     // schedule.
     expect(commentSignals([c(`${CODEX_BOT}[bot]`, "2026-08-15T08:00:00Z")], { since: undefined, owner: OWNER }))
       .toEqual({ codexAt: null, nudgeAt: null });
+  });
+});
+
+describe("newestIn", () => {
+  it("takes the newest node, not the first one", () => {
+    // A GraphQL connection is oldest-first, so `nodes[0]` of a `last:N`
+    // window is the Nth-most-recent event. Every caller asks for `last:1`
+    // today, where the two coincide -- this is what keeps raising a bound
+    // from silently flooring the verdict on the oldest event in the page.
+    expect(newestIn({ nodes: [
+      { createdAt: "2026-08-14T10:00:00Z" },
+      { createdAt: "2026-08-14T12:00:00Z" },
+      { createdAt: "2026-08-14T11:00:00Z" },
+    ] })).toBe("2026-08-14T12:00:00Z");
+  });
+
+  it("is null for an absent, empty or malformed connection", () => {
+    // The absent case is ordinary: a pull request that has never been
+    // force-pushed or retargeted has no such event, and null means "no
+    // floor from here" rather than an error.
+    expect(newestIn(undefined)).toBeNull();
+    expect(newestIn({ nodes: [] })).toBeNull();
+    expect(newestIn({ nodes: [{}] })).toBeNull();
   });
 });
 
