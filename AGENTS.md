@@ -32,7 +32,13 @@ has stopped biting.
 
 ## Testing
 
-- `node --test *.test.js`. No install step; any recent node runs it.
+- `node --test *.test.js`. No install step — nothing here is packaged — but
+  `check-consumers.test.js` runs the sweep, which shells out to the real
+  checker, so it needs `python3` with PyYAML too, exactly as
+  `check_consumer_test.py` and CI do. Stubbing the checker to avoid that would
+  leave the guard tested against a fake of the thing it has to agree with, and
+  the script calls `python3` either way, so it would buy no independence worth
+  having.
 - **Add or update tests with any change.** This suite is the only thing between
   a push and every consumer, so a change that ships untested ships unreviewed.
 - The suites' failure mode is a *false pass* — a set difference against an
@@ -73,14 +79,17 @@ has stopped biting.
   That deadlock is why `templates/superseded/<label>/` exists: put the
   outgoing files there in the same commit that changes the template, and
   nothing goes red. Consumers then migrate one at a time, each reported by a
-  `notice:` line until it moves, and **deleting the directory is what ends the
-  migration** — leave it and the pin quietly accepts two shapes forever. Only
+  `notice:` line until it moves, and **deleting that label's directory is what
+  ends the migration** — leave it and the pin quietly accepts two shapes forever. Only
   ever offer a shape this repository actually shipped; the set is exact
   matches, not a relaxation. A label holds **all three files**, not just the
   one that changed, and is matched whole — storing only the delta would accept
   an old file beside current versions of the others, which is a combination
   nobody shipped and, for the sweep and listener, a broken relay rather than an
-  old one. An incomplete label fails the check by name.
+  old one. An incomplete label fails the check by name, and so does one whose
+  name is not a plain word: the label is quoted into that `notice:` line and
+  read back out of it by the sweep, so it starts with a letter or digit and
+  holds only letters, digits, `.`, `_` and `-`.
 - **Pilot ONE consumer, and pilot it BEFORE the merge.** Never open the same
   change across the consumers at once. They share one automated reviewer, so a
   finding against a change made nine times is the same finding nine times --
