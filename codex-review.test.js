@@ -831,13 +831,119 @@ describe("sweep", () => {
       statuses: { abc1234: [{ context: "Vercel", state: "success", created_at: era }] },
       checkSuites: { abc1234: [{ created_at: era, head_branch: "claude/topic" }] },
       graphqlResponses: [repoPRs([prNode({
-        timelineItems: { nodes: [{ createdAt: "2026-08-14T12:00:00Z" }] },
+        forcePushes: { nodes: [{ createdAt: "2026-08-14T12:00:00Z" }] },
         reactions: page([thumbs(undefined, "2026-08-10T09:05:00Z")]),
       })])],
     });
     const out = await runFull(fake);
     expect(out.awaiting).toBe(1);
     expect(out.written[0].state).toBe("pending");
+  });
+
+  it("asks GitHub for the retarget event, not only the force-push", async () => {
+    // THE assertion for the retarget hole, and it has to be made against the
+    // query rather than a fixture. A retarget moves nothing else — head SHA,
+    // statuses and check suites all stand still — so the only thing that can
+    // reveal it is a BaseRefChangedEvent in the timeline, and the stub here
+    // does not model GitHub's own `itemTypes` filtering: a fixture timeline
+    // node is returned whatever the query asked for. So the two behavior
+    // tests below would pass against the pre-fix query too. This one cannot.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      graphqlResponses: [repoPRs([prNode({})])],
+    });
+    await runFull(fake);
+    const query = fake.calls.find((c) => c.path === "/graphql")?.body?.query;
+    // Assert the query was found before asserting anything about it: a
+    // `toContain` against undefined would throw, but a future refactor
+    // could leave this reading an empty string and passing vacuously.
+    expect(typeof query).toBe("string");
+    expect(query).toContain("BASE_REF_CHANGED_EVENT");
+    expect(query).toContain("... on BaseRefChangedEvent");
+    // The force-push floor is not replaced by it — both are floors, and the
+    // query takes `last:1` over both types, which is their maximum.
+    expect(query).toContain("HEAD_REF_FORCE_PUSHED_EVENT");
+  });
+
+  it("revokes a standing 👍 dated before the newest timeline floor", async () => {
+    // What the retarget event buys once it is in the timeline: a 👍 older
+    // than it reads stale, so a base change cannot leave `codex: success`
+    // standing over a diff nothing has read. The head already carries
+    // `pending`, so the assertion is that nothing flipped it to success --
+    // which is what the pre-fix code did with the same fixture.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate("2026-08-14T11:50:00Z")] },
+      checkSuites: { abc1234: [bornSuite("2026-08-14T11:49:00Z")] },
+      graphqlResponses: [repoPRs([prNode({
+        updatedAt: "2026-08-14T12:01:00Z",
+        // The retarget, AFTER the 👍 below.
+        retargets: { nodes: [{ createdAt: "2026-08-14T12:00:00Z" }] },
+        reactions: page([thumbs(undefined, "2026-08-14T11:55:00Z")]),
+      })])],
+    });
+    const out = await runFull(fake);
+    expect(out.written).toEqual([]);
+    expect(out.awaiting).toBe(1);
+  });
+
+  it("does not let a pre-retarget review settle the head", async () => {
+    // A review record is tied to the head by its commit id, which is enough
+    // while the head is the only thing that moves — but a retarget changes
+    // the diff underneath an unchanged head, so the old review still
+    // matches. Counting it holds the gate closed (safe) while marking the
+    // head ANSWERED, which drops it off the minute loop; the clean 👍 that
+    // follows a re-review emits no webhook, so the gate would then sit
+    // pending until the hourly sweep. Awaiting must stay 1.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate("2026-08-14T11:50:00Z")] },
+      checkSuites: { abc1234: [bornSuite("2026-08-14T11:49:00Z")] },
+      prReviews: { 1: [review("abc1234", undefined, "2026-08-14T11:55:00Z")] },
+      graphqlResponses: [repoPRs([prNode({
+        updatedAt: "2026-08-14T12:01:00Z",
+        retargets: { nodes: [{ createdAt: "2026-08-14T12:00:00Z" }] },
+      })])],
+    });
+    const out = await runFull(fake);
+    expect(out.written).toEqual([]);
+    expect(out.awaiting).toBe(1);
+  });
+
+  it("treats a review tied with the retarget second as stale", async () => {
+    // GitHub stamps to the second, so a review submitted in the same second
+    // as the base change has no established order against it. The reaction
+    // and comment paths already resolve that ambiguity toward stale; this
+    // asserts the review path does too, rather than settling the head on a
+    // tie and stopping the loop.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate("2026-08-14T11:50:00Z")] },
+      checkSuites: { abc1234: [bornSuite("2026-08-14T11:49:00Z")] },
+      prReviews: { 1: [review("abc1234", undefined, "2026-08-14T12:00:00Z")] },
+      graphqlResponses: [repoPRs([prNode({
+        updatedAt: "2026-08-14T12:01:00Z",
+        retargets: { nodes: [{ createdAt: "2026-08-14T12:00:00Z" }] },
+      })])],
+    });
+    const out = await runFull(fake);
+    expect(out.written).toEqual([]);
+    expect(out.awaiting).toBe(1);
+  });
+
+  it("keeps approving when the 👍 postdates the timeline floor", async () => {
+    // The other direction, so the guard above cannot be satisfied by a rule
+    // that simply refuses every pull request carrying one of these events:
+    // Codex re-reading AFTER the retarget is the verdict we want honored.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate("2026-08-14T11:50:00Z")] },
+      checkSuites: { abc1234: [bornSuite("2026-08-14T11:49:00Z")] },
+      graphqlResponses: [repoPRs([prNode({
+        updatedAt: "2026-08-14T12:04:00Z",
+        retargets: { nodes: [{ createdAt: "2026-08-14T12:00:00Z" }] },
+        // Codex re-read after the retarget.
+        reactions: page([thumbs(undefined, "2026-08-14T12:03:00Z")]),
+      })])],
+    });
+    const out = await runFull(fake);
+    expect(out.written[0].state).toBe("success");
   });
 
   it("rescues a 👍 dated too late only by a slow external status", async () => {
@@ -1326,7 +1432,7 @@ describe("sweep", () => {
         { created_at: "2026-08-14T12:20:00Z", head_branch: "claude/topic" },
       ] },
       graphqlResponses: [repoPRs([prNode({
-        timelineItems: { nodes: [{ createdAt: "2026-08-14T12:00:00Z" }] },
+        forcePushes: { nodes: [{ createdAt: "2026-08-14T12:00:00Z" }] },
         reactions: page([thumbs(undefined, "2026-08-14T12:10:00Z")]),
       })])],
     });
