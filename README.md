@@ -21,12 +21,11 @@ see [Why the workflow lives in your repo](#why-the-workflow-lives-in-your-repo).
 
 ```yaml
 name: codex-review
-
 on:
   schedule:
     - cron: '23 * * * *'
   pull_request_target:
-    types: [opened, reopened, ready_for_review, synchronize, closed]
+    types: [opened, reopened, ready_for_review, synchronize, edited, closed]
   issue_comment:
     types: [created, edited]
   pull_request_review_comment:
@@ -34,17 +33,14 @@ on:
   workflow_run:
     workflows: [codex-review-listener]
     types: [completed]
-
 permissions:
   contents: read
   pull-requests: read
   checks: read
   statuses: write
-
 concurrency:
   group: codex-review
   cancel-in-progress: false
-
 jobs:
   sweep:
     runs-on: ubuntu-latest
@@ -57,24 +53,10 @@ And alongside it, as `codex-review-listener.yml`, the unprivileged half:
 
 ```yaml
 name: codex-review-listener
-
-# Hears the one verdict delivery the sweep's own triggers cannot safely hear.
-# `pull_request_review` is a merge-ref event -- GitHub runs the workflow file
-# from refs/pull/<n>/merge, the pull request's own version -- so it must never
-# appear on a workflow that can write commit statuses. This listener declares
-# no permissions and does one no-op step. That is least-privilege hygiene,
-# not a wall: a same-repository branch can edit any workflow file, this one
-# included, and grant itself what it likes -- but that attacker never needed
-# this file, since a workflow of their own on `push` could publish the
-# status directly. What the relay guarantees is narrower and real: the
-# workflow that CAN write statuses only ever runs its default-branch
-# definition. Its completion starts the sweep above via `workflow_run`.
 on:
   pull_request_review:
     types: [submitted, edited, dismissed]
-
 permissions: {}
-
 jobs:
   heard:
     runs-on: ubuntu-latest
@@ -82,6 +64,29 @@ jobs:
     steps:
       - run: 'true'
 ```
+
+And, as `codex-review-check.yml`, the eight lines that verify all three stay
+correct. Everything it knows lives in
+[`check-consumer.mjs`](check-consumer.mjs) here, so a fix reaches every
+consumer at once instead of being hand-carried into nine repositories in four
+languages -- which is what the hand-written copies it replaced cost:
+
+```yaml
+name: codex-review-check
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check:
+    uses: mikelward/codex-review/.github/workflows/check-consumer.yml@main
+```
+
+Why each setting is what it is -- the two triggers that must never appear, why
+the relay is a separate file, why `sweep` must not be a required check, and the
+two ruleset settings that are load-bearing together -- is in
+[docs/CONSUMER.md](docs/CONSUMER.md).
 
 Then add `codex` to the required status checks for your default branch. Until
 you do, the status is published and ignored.
