@@ -1091,11 +1091,20 @@ export async function runLoop({
  * An action input, falling back to the environment variable the standalone
  * script used before this was packaged.
  *
- * Actions pass inputs as `INPUT_<NAME>` with dashes turned to underscores and
- * the name upper-cased. Reading the env fallback too keeps `node
- * codex-review.mjs` runnable by hand -- which is how a verdict gets unstuck
- * without waiting for a scheduled fire, and how the loop's behavior is checked
- * against a real repository.
+ * The runner upper-cases the input name and replaces SPACES with underscores;
+ * every other character, a hyphen included, is passed through. So
+ * `loop-minutes` arrives as `INPUT_LOOP-MINUTES`, and reading
+ * `INPUT_LOOP_MINUTES` -- as this did -- finds nothing, falls through to the
+ * env fallback, finds nothing there either, and hands `main` an empty string.
+ * The two hyphenated inputs are exactly the two that decide the loop, so
+ * `minutes` became 0 and every run swept once and exited: the per-run
+ * `cadence` map never survived to throttle anything, each run re-judged every
+ * open head from cold, and the schedule became the only clock. `token` and
+ * `repository` have no hyphen, which is why the action otherwise worked and
+ * the failure looked like a scheduling problem for weeks.
+ *
+ * Both spellings are read because a hand-run is the documented way to unstick
+ * a verdict, and `INPUT_LOOP_MINUTES` is what a person types.
  *
  * An input that was declared but left unset arrives as the empty string rather
  * than absent, so emptiness rather than `undefined` is what falls through --
@@ -1103,7 +1112,9 @@ export async function runLoop({
  * is 0, instead of the default.
  */
 export const input = (name, envVar) => {
-  const fromAction = process.env[`INPUT_${name.toUpperCase().replaceAll("-", "_")}`];
+  const upper = name.toUpperCase();
+  const fromAction = process.env[`INPUT_${upper}`]
+    || process.env[`INPUT_${upper.replaceAll("-", "_")}`];
   if (fromAction) return fromAction;
   return process.env[envVar] || "";
 };
