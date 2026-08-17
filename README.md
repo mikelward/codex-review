@@ -20,6 +20,22 @@ Add this workflow. Everything in it outside the `uses:` line is deliberate —
 see [Why the workflow lives in your repo](#why-the-workflow-lives-in-your-repo).
 
 ```yaml
+# Republishes Codex's review verdict as the `codex` commit status a ruleset
+# can require. Codex posts no check run, and a clean pass is only a reaction
+# on the pull request body -- which emits no webhook -- so this polls rather
+# than reacting to an event.
+#
+# Every line below is deliberate, and each wrong setting produces no error at
+# all -- just a merge gate that quietly stops working, or one that can never
+# clear. The reasoning is in docs/CONSUMER.md of mikelward/codex-review, not
+# repeated here: it used to be a 144-line header duplicated in nine
+# repositories, which is how it went stale in six of them.
+#
+# REQUIRE `codex`. DO NOT REQUIRE `sweep`, and require branches up to date.
+# Both are explained there, and both are load-bearing.
+#
+# check_consumer.py compares this file byte for byte, so an edit here fails until
+# it is re-approved centrally.
 name: codex-review
 on:
   schedule:
@@ -52,6 +68,11 @@ jobs:
 And alongside it, as `codex-review-listener.yml`, the unprivileged half:
 
 ```yaml
+# Hears the one verdict delivery the sweep's own triggers cannot safely hear:
+# a review with no inline comments, which emits neither comment event and no
+# reaction. `pull_request_review` is a merge-ref event, so it must never
+# appear on a workflow that can write commit statuses; this one holds nothing
+# and relays through `workflow_run`. See docs/CONSUMER.md.
 name: codex-review-listener
 on:
   pull_request_review:
@@ -67,7 +88,7 @@ jobs:
 
 And, as `codex-review-check.yml`, the eight lines that verify all three stay
 correct. Everything it knows lives in
-[`check-consumer.mjs`](check-consumer.mjs) here, so a fix reaches every
+[`check_consumer.py`](check_consumer.py) here, so a fix reaches every
 consumer at once instead of being hand-carried into nine repositories in four
 languages -- which is what the hand-written copies it replaced cost:
 

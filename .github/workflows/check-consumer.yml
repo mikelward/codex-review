@@ -3,10 +3,10 @@ name: check-consumer
 # The consumer-side check, as a reusable workflow so there is one copy of it.
 #
 # A consumer calls this from an eight-line `codex-review-check.yml` of its own
-# (pinned by check-consumer.mjs, so a repository cannot quietly stop running
+# (pinned by check_consumer.py, so a repository cannot quietly stop running
 # it). Everything the check knows -- the workflow pair's exact contents, the
 # sole-writer rule, which permissions notations it refuses to guess at -- lives
-# in check-consumer.mjs here, tested by check-consumer.test.js here.
+# in check_consumer.py here, tested by check_consumer_test.py here.
 #
 # It used to live as a hand-written test in each of the nine consumers, in four
 # languages. Two review findings days apart, against two different copies,
@@ -17,6 +17,13 @@ name: check-consumer
 # `workflow_call` rather than a composite action because two consumers have no
 # CI workflow at all to add a step to, and a reusable workflow is the form that
 # serves both.
+#
+# The check is Python because the one thing it cannot do by comparison -- read
+# a consumer's own ci.yml and answer whether any job can write commit statuses
+# -- needs a real YAML parser, and the runner ships PyYAML. That is not a
+# dependency taken on: this repository still has no package.json, no lockfile
+# and no install step, which is what lets a consumer trust an unpinned `@main`
+# by reading the files.
 
 on:
   workflow_call:
@@ -48,10 +55,7 @@ jobs:
           path: .codex-review
           persist-credentials: false
 
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-
-      # No install step, because there is nothing to install.
+      # No install step, because there is nothing to install: python3 and
+      # PyYAML are both on the runner image.
       - name: Check the consumer's codex-review setup
-        run: node .codex-review/check-consumer.mjs .
+        run: python3 .codex-review/check_consumer.py .
