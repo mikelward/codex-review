@@ -20,6 +20,11 @@ removes the entire YAML-notation surface from the files that matter most, which
 is why the reasoning that used to justify each line lives in docs/CONSUMER.md
 rather than in a header each consumer could edit.
 
+"The shipped ones" is a SET, not a single file, and that is what makes a
+template change possible at all -- see ``superseded_shapes``. Each member is
+still an exact match; what the set buys is that consumers can move one at a
+time instead of all at the instant a template merges.
+
 **Can any other workflow write commit statuses?** These differ per repository --
 ci.yml, release.yml, dependency-update.yml -- so they cannot be pinned, and this
 is the one place a workflow has to be understood rather than compared. It is
@@ -110,6 +115,61 @@ def template(name, root=HERE):
     return (root / "templates" / name).read_text()
 
 
+#: Where shapes that are no longer current, but are still accepted, live.
+#:
+#: One subdirectory per shape, named for what changed, holding a COMPLETE copy
+#: of all three files as they were shipped together. Nothing globs
+#: ``templates/`` -- every reader names a file -- so nesting this inside it
+#: keeps "what shape may a consumer have" answerable from one directory.
+SUPERSEDED = "superseded"
+
+
+def superseded_shapes(root=HERE):
+    """Older still-accepted shapes, keyed by label; each a complete file set.
+
+    This is the whole migration mechanism, and it exists because the byte-for-
+    byte pin has no other way through. A consumer's files are compared against
+    ``templates/`` at ``@main``, so changing a template makes every consumer
+    mismatch the instant it merges -- while the hub's own CI checks real
+    consumer trees against the revision under review, so the change is red
+    before it can merge and the consumers cannot be fixed until it has. That is
+    a deadlock, and it gets worse with every repository added.
+
+    Accepting a set of shapes rather than one breaks it without weakening the
+    comparison: each shape is still an exact match against files in this
+    repository. A template change adds the outgoing shape here (nothing goes
+    red), consumers migrate one at a time, and deleting the directory is what
+    ends the migration -- and what makes the pin single-shaped again.
+
+    A shape is a WHOLE SET, and matched as one. Storing only the file a
+    migration changed, and falling back to the current template for the rest,
+    would accept the cartesian product of per-file versions: a consumer could
+    hold an old file from one label beside current versions of the others, a
+    combination this repository never shipped. That is not hypothetical for
+    these three -- the sweep names the listener in its ``workflow_run`` trigger,
+    so they are two ends of one relay, and a migration touching that pair has a
+    mixed state that is broken rather than merely old. Keeping each label
+    complete costs two extra small files and removes the question.
+
+    Returning a mapping rather than a bare list is deliberate: a consumer on an
+    old shape is REPORTED by label, never silently passed. A migration nobody
+    can see is how "accepted for now" becomes permanent.
+    """
+    directory = root / "templates" / SUPERSEDED
+    if not directory.is_dir():
+        return {}
+    shapes = {}
+    for shape in sorted(directory.iterdir()):
+        if not shape.is_dir():
+            continue
+        shapes[shape.name] = {
+            name: (shape / name).read_text()
+            for name in TEMPLATES
+            if (shape / name).is_file()
+        }
+    return shapes
+
+
 def is_workflow(name):
     """Both extensions GitHub accepts.
 
@@ -184,8 +244,16 @@ def judge(value):
     return "safe"
 
 
-def check_consumer(root=".", templates_root=None):
-    """Check one consumer repository. Returns a list of problems, empty if correct."""
+def check_consumer(root=".", templates_root=None, notices=None):
+    """Check one consumer repository. Returns a list of problems, empty if correct.
+
+    ``notices`` is an optional list to append non-fatal reports to -- today,
+    that a file matches a superseded shape rather than the current template.
+    They are kept out of the return value because they must not decide the exit
+    status: a consumer mid-migration is correct, just not yet moved. They are
+    an out-parameter rather than a second return value so that every existing
+    caller keeps working; pass a list when you intend to show them.
+    """
     root = Path(root)
     workflows = root / ".github" / "workflows"
     problems = []
@@ -197,8 +265,9 @@ def check_consumer(root=".", templates_root=None):
     hub = is_hub(root)
     required = [n for n in TEMPLATES if not (hub and n == CALLER)]
 
-    # 1. The files, byte for byte. No parsing: the question is whether this is
-    # the shipped file, not what it means.
+    # 1. The files, byte for byte. No parsing: the question is whether these
+    # are the shipped files, not what they mean.
+    templates = templates_root or HERE
     for name in required:
         if name not in present:
             problems.append(
@@ -206,17 +275,57 @@ def check_consumer(root=".", templates_root=None):
                 if name == CALLER
                 else f"{name} is missing — the relay needs both ends"
             )
-            continue
-        actual = (workflows / name).read_text()
-        expected = template(name, templates_root or HERE)
-        if actual == expected:
-            continue
-        line = first_difference(actual, expected)
-        problems.append(
-            f"{name} differs from the shipped template at line {line} — copy "
-            "templates/ from mikelward/codex-review; the reasoning is in "
-            "docs/CONSUMER.md"
-        )
+
+    if all(name in present for name in required):
+        actual = {name: (workflows / name).read_text() for name in required}
+        current = {name: template(name, templates) for name in required}
+        shapes = superseded_shapes(templates)
+
+        # A shape recorded without every file is an authoring mistake here, not
+        # a consumer's fault, and it must not read as "no shape matched" — that
+        # would fail a consumer for a defect in the mechanism. Fail loudly
+        # naming the label instead.
+        for label, files in shapes.items():
+            absent = [name for name in TEMPLATES if name not in files]
+            if absent:
+                problems.append(
+                    f"the superseded shape `{label}` is incomplete — it is missing "
+                    f"{', '.join(absent)}. A shape is matched whole, so it must hold "
+                    "all three files as they were shipped together"
+                )
+
+        if actual != current:
+            # Matched as a SET, against one label. Per-file matching would
+            # accept the cartesian product of versions: an old file from one
+            # label beside current versions of the rest is a combination this
+            # repository never shipped, and for the sweep and listener -- two
+            # ends of one relay -- a mixed pair is broken rather than merely old.
+            shape = next(
+                (
+                    label
+                    for label, files in shapes.items()
+                    if all(name in files and files[name] == actual[name] for name in required)
+                ),
+                None,
+            )
+            if shape is not None:
+                if notices is not None:
+                    notices.append(
+                        f"matches the superseded shape `{shape}` rather than the current "
+                        "templates — migrate by copying templates/ from "
+                        "mikelward/codex-review; the shape is accepted only until the "
+                        "last consumer has moved"
+                    )
+            else:
+                for name in required:
+                    if actual[name] == current[name]:
+                        continue
+                    line = first_difference(actual[name], current[name])
+                    problems.append(
+                        f"{name} differs from the shipped template at line {line} — copy "
+                        "templates/ from mikelward/codex-review; the reasoning is in "
+                        "docs/CONSUMER.md"
+                    )
 
     # 2. Every other workflow, parsed. The listener and the caller are among
     # these and are pinned above, so this is never vacuous even in a repository
@@ -256,7 +365,12 @@ def check_consumer(root=".", templates_root=None):
 
 
 def main(argv):
-    problems = check_consumer(argv[1] if len(argv) > 1 else ".")
+    notices = []
+    problems = check_consumer(argv[1] if len(argv) > 1 else ".", notices=notices)
+    # Printed whether or not there are problems, and before them: a consumer
+    # left on an old shape is the thing a migration has to be able to see.
+    for notice in notices:
+        print(f"notice: {notice}")
     for problem in problems:
         print(f"error: {problem}", file=sys.stderr)
     if problems:

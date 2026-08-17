@@ -423,6 +423,156 @@ class TheNoDependencyInvariant(unittest.TestCase):
         self.assertIn("sys.exit(", source)
 
 
+class SupersededShapes(ConsumerCase):
+    """The migration mechanism: a template change consumers can follow late.
+
+    Without it a template edit is a deadlock -- every consumer mismatches the
+    moment it merges, and the hub's own CI checks real consumer trees against
+    the revision under review, so the edit is red before it can merge and the
+    consumers cannot be fixed until it has. Each case below asserts both
+    directions, because the failure mode here is a set that quietly accepts
+    anything.
+    """
+
+    def templates(self, current, superseded=None):
+        """A templates root: the current three, plus optional older shapes.
+
+        ``superseded`` maps a label to a mapping of filename to bytes, which is
+        the on-disk layout the checker reads.
+        """
+        root = Path(tempfile.mkdtemp())
+        directory = root / "templates"
+        directory.mkdir()
+        for name, text in current.items():
+            (directory / name).write_text(text)
+        for label, files in (superseded or {}).items():
+            shape = directory / check_consumer.SUPERSEDED / label
+            shape.mkdir(parents=True)
+            for name, text in files.items():
+                (shape / name).write_text(text)
+        return root
+
+    def setUp(self):
+        self.old_caller = check_consumer.template(CALLER)
+        self.new_caller = self.old_caller.replace("on:\n", "on:\n  workflow_dispatch:\n")
+        self.sweep = check_consumer.template(SWEEP)
+        self.listener = check_consumer.template(LISTENER)
+        # A rewrite that changed nothing would make every case below vacuous.
+        self.assertNotEqual(self.new_caller, self.old_caller)
+        self.current = {SWEEP: self.sweep, LISTENER: self.listener, CALLER: self.new_caller}
+        # A complete shape: all three files as they were shipped together.
+        self.shipped = {SWEEP: self.sweep, LISTENER: self.listener, CALLER: self.old_caller}
+
+    def test_a_consumer_on_the_current_templates_passes_silently(self):
+        root = self.templates(self.current, {"push-only": self.shipped})
+        notices = []
+        problems = check(self.consumer(**{"codex-review-check.yml": self.new_caller}), root, notices)
+        self.assertEqual(problems, [])
+        self.assertEqual(notices, [])
+
+    def test_a_consumer_on_a_superseded_shape_passes_and_is_reported(self):
+        # The point of the whole mechanism: accepted, so the template change
+        # can land; reported, so the migration it starts cannot be forgotten.
+        root = self.templates(self.current, {"push-only": self.shipped})
+        notices = []
+        problems = check(self.consumer(**{"codex-review-check.yml": self.old_caller}), root, notices)
+        self.assertEqual(problems, [])
+        self.assertEqual(len(notices), 1)
+        self.assertIn("push-only", notices[0])
+
+    def test_the_same_shape_fails_once_it_is_no_longer_offered(self):
+        # Deleting the directory is what ENDS a migration, so this is the
+        # assertion that the pin goes back to one shape rather than silently
+        # keeping every shape it ever accepted.
+        root = self.templates(self.current)
+        notices = []
+        problems = check(self.consumer(**{"codex-review-check.yml": self.old_caller}), root, notices)
+        self.assertProblem(problems, "differs from the shipped template")
+        self.assertEqual(notices, [])
+
+    def test_a_shape_nobody_shipped_is_still_a_problem(self):
+        # The set is exact matches against files in this repository, not a
+        # relaxation. A locally edited file matches neither and fails.
+        root = self.templates(self.current, {"push-only": self.shipped})
+        local = self.old_caller.replace("contents: read", "contents: write")
+        self.assertProblem(
+            check(self.consumer(**{"codex-review-check.yml": local}), root),
+            "differs from the shipped template",
+        )
+
+    def test_a_mix_of_two_shipped_generations_is_refused(self):
+        # The cartesian-product hole, and the reason a shape is matched whole.
+        # Both files below were shipped -- just never together. The sweep names
+        # the listener in its `workflow_run` trigger, so a mixed pair is broken
+        # rather than merely old, and per-file matching would pass it.
+        old_listener = self.listener.replace("name: codex-review-listener", "name: codex-review-relay")
+        self.assertNotEqual(old_listener, self.listener)
+        shipped_then = dict(self.shipped, **{LISTENER: old_listener})
+        root = self.templates(self.current, {"old-relay": shipped_then})
+        # Old caller from `old-relay`, current listener: each half is a file
+        # this repository shipped, the combination is not.
+        problems = check(
+            self.consumer(
+                **{"codex-review-check.yml": self.old_caller, "codex-review-listener.yml": self.listener}
+            ),
+            root,
+        )
+        self.assertProblem(problems, "differs from the shipped template")
+
+    def test_that_same_generation_passes_when_taken_whole(self):
+        # The other direction of the case above: the identical label accepts a
+        # consumer that holds all of it, or the refusal above would just be the
+        # mechanism failing to work at all.
+        old_listener = self.listener.replace("name: codex-review-listener", "name: codex-review-relay")
+        shipped_then = dict(self.shipped, **{LISTENER: old_listener})
+        root = self.templates(self.current, {"old-relay": shipped_then})
+        notices = []
+        problems = check(
+            self.consumer(
+                **{"codex-review-check.yml": self.old_caller, "codex-review-listener.yml": old_listener}
+            ),
+            root,
+            notices,
+        )
+        self.assertEqual(problems, [])
+        self.assertIn("old-relay", notices[0])
+
+    def test_an_incomplete_shape_is_an_authoring_error_here(self):
+        # Recording only the file a migration changed is the mistake that
+        # reopens the hole above, so it fails naming the label -- and it fails
+        # even for a consumer that is otherwise current, because the defect is
+        # in this repository rather than in the consumer.
+        root = self.templates(self.current, {"push-only": {CALLER: self.old_caller}})
+        problems = check(self.consumer(**{"codex-review-check.yml": self.new_caller}), root)
+        self.assertProblem(problems, "`push-only` is incomplete")
+        self.assertProblem(problems, "matched whole")
+
+    def test_notices_are_optional_so_every_existing_caller_keeps_working(self):
+        # `check_consumer` is called without a notices list in this suite, in
+        # scripts/check-consumers.sh's checker, and by consumers. A shape on
+        # its way out must not make those calls fail.
+        root = self.templates(self.current, {"push-only": self.shipped})
+        self.assertEqual(check(self.consumer(**{"codex-review-check.yml": self.old_caller}), root), [])
+
+    def test_no_superseded_directory_is_the_ordinary_case(self):
+        # Nothing requires the directory to exist, which is what keeps the
+        # repository single-shaped between migrations rather than carrying an
+        # empty migration around forever.
+        root = self.templates(self.current)
+        self.assertEqual(check_consumer.superseded_shapes(root), {})
+
+    def test_every_offered_shape_is_found_and_labeled(self):
+        # Two at once, because a migration can overlap another. A lookup that
+        # returned only the first would accept one shape and reject the other
+        # with nothing to say why.
+        older = dict(self.shipped, **{SWEEP: self.sweep.replace("cron: '23 * * * *'", "cron: '7 * * * *'")})
+        self.assertNotEqual(older[SWEEP], self.sweep)
+        root = self.templates(self.current, {"push-only": self.shipped, "old-cron": older})
+        self.assertEqual(
+            check_consumer.superseded_shapes(root), {"old-cron": older, "push-only": self.shipped}
+        )
+
+
 class MissingDirectory(unittest.TestCase):
     def test_is_reported(self):
         with tempfile.TemporaryDirectory() as empty:
