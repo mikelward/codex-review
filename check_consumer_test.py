@@ -372,6 +372,57 @@ class TheHubExemption(ConsumerCase):
         self.assertProblem(check(root), "nothing in this repository runs this check")
 
 
+class TheNoDependencyInvariant(unittest.TestCase):
+    """Nothing this repository runs may fetch a package at gate time.
+
+    PyYAML comes from the runner image. Installing it was tried and reverted:
+    it put PyPI on the critical path of nine merge gates, and an unpinned
+    install takes whatever release is newest, so a parser regression could
+    move a verdict with no change in any repository. A comment saying so is
+    not enforcement -- this is.
+    """
+
+    def workflows(self):
+        here = Path(check_consumer.__file__).resolve().parent
+        found = sorted((here / ".github" / "workflows").glob("*.y*ml"))
+        # Without this the scan is a set difference against an empty set,
+        # which is the false pass this suite exists to refuse.
+        self.assertTrue(found, "no workflows found to scan")
+        return found
+
+    def test_no_workflow_installs_a_package(self):
+        # Reads the `run:` scripts a job actually executes, not the file text.
+        # The comments deliberately discuss `pip install` -- explaining why it
+        # is absent is the point of them -- so a grep over the source would
+        # fail on its own rationale.
+        scanned = 0
+        for path in self.workflows():
+            doc = yaml.safe_load(path.read_text())
+            for job in (doc.get("jobs") or {}).values():
+                for step in (job.get("steps") or []) if isinstance(job, dict) else []:
+                    run = step.get("run") if isinstance(step, dict) else None
+                    if not run:
+                        continue
+                    scanned += 1
+                    for forbidden in ("pip install", "npm install", "npm ci", "pipx install"):
+                        self.assertNotIn(
+                            forbidden,
+                            run,
+                            f"{path.name} runs {forbidden!r}; PyYAML comes from "
+                            "the runner image and nothing may be fetched at gate time",
+                        )
+        self.assertTrue(scanned, "no run steps found to scan")
+
+    def test_the_checker_fails_closed_when_the_parser_is_absent(self):
+        # The whole risk this invariant accepts is the image dropping PyYAML,
+        # and it is only acceptable because that is loud. `sys.exit(str)`
+        # exits non-zero, so the gate goes red rather than reporting a pass
+        # it never made.
+        source = (Path(check_consumer.__file__).resolve()).read_text()
+        self.assertIn("except ImportError", source)
+        self.assertIn("sys.exit(", source)
+
+
 class MissingDirectory(unittest.TestCase):
     def test_is_reported(self):
         with tempfile.TemporaryDirectory() as empty:
