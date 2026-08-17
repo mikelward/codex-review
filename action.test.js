@@ -284,3 +284,28 @@ describe("action.yml", () => {
     expect(importLines(script)).toEqual([]);
   });
 });
+
+describe("the autopilot decision record", () => {
+  it("is a contract in AGENTS.md, not just a file that happens to exist", () => {
+    // TODO.md's heading is where an unasked question goes to be seen. If the
+    // rule requiring it lives only in the habit of whoever wrote the file,
+    // the next agent keeps autopilot's speed while quietly spending the
+    // owner's judgment — which is the one thing autopilot trades away.
+    const agents = readFileSync("AGENTS.md", "utf8");
+    const section = agents.match(/## Autopilot[\s\S]*?\n## /)?.[0];
+    expect(typeof section).toBe("string");
+    expect(section).toContain("TODO.md");
+    expect(section).toMatch(/Decisions\s+needing\s+review/);
+    // The three things that make an entry reviewable rather than a note.
+    expect(section).toMatch(/what was decided/);
+    expect(section).toMatch(/alternative/);
+    expect(section).toMatch(/undoing it would cost/);
+  });
+
+  it("keeps the heading the rule names", () => {
+    // Asserted against the file itself, so renaming the heading breaks here
+    // rather than silently orphaning every entry under it.
+    const todo = readFileSync("TODO.md", "utf8");
+    expect(todo).toMatch(/^## Decisions needing review$/m);
+  });
+});

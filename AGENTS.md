@@ -44,6 +44,14 @@ has stopped biting.
 - **Don't disable a failing check** to make it pass, and don't paper over a
   flaky one with sleeps or retries.
 
+## Autopilot
+
+- **A guess made instead of asking goes in `TODO.md`** under *Decisions
+  needing review*, naming what was decided, what the alternative was, and what
+  undoing it would cost. Autopilot's whole trade is speed for the owner's
+  judgment, and an unrecorded guess keeps the speed while quietly spending the
+  judgment — it becomes permanent by nobody noticing it happened.
+
 ## Releasing
 
 - There is no release step: merging to `main` *is* the release. Changes get
