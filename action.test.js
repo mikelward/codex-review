@@ -194,7 +194,7 @@ describe("action.yml", () => {
     // it is read. WHY each is what it is lives in docs/CONSUMER.md.
     const blocks = [...readme.matchAll(/```yaml\n([\s\S]*?)```/g)].map((m) => m[1]);
     expect(blocks).toHaveLength(3);
-    const pinned = [SWEEP_DIRECTIVES, LISTENER_DIRECTIVES, CALLER_DIRECTIVES];
+    const pinned = [SWEEP_DIRECTIVES(), LISTENER_DIRECTIVES(), CALLER_DIRECTIVES()];
     blocks.forEach((block, i) => {
       // The template carries no comments, so its lines ARE its directives.
       expect(directives(block)).toEqual(pinned[i]);
