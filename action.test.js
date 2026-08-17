@@ -14,12 +14,16 @@
 // the files it runs. A parser would be the first thing to break that.
 import { describe, it, expect } from "./vitest-shim.mjs";
 import { readFileSync, existsSync } from "node:fs";
-import {
-  directives,
-  SWEEP_DIRECTIVES,
-  LISTENER_DIRECTIVES,
-  CALLER_DIRECTIVES,
-} from "./check-consumer.mjs";
+
+// templates/ is the single copy of each consumer file; check_consumer.py
+// compares a consumer's against it byte for byte. Read directly rather than
+// imported, the checker being Python.
+const TEMPLATES = [
+  "codex-review.yml",
+  "codex-review-listener.yml",
+  "codex-review-check.yml",
+];
+const template = (name) => readFileSync(`templates/${name}`, "utf8");
 
 const manifest = readFileSync("action.yml", "utf8");
 const script = readFileSync("codex-review.mjs", "utf8");
@@ -166,14 +170,19 @@ describe("action.yml", () => {
     // pointing at docs/CONSUMER.md, so each must END with its block.
     const blocks = [...readme.matchAll(/```yaml\n([\s\S]*?)```/g)].map((m) => m[1]);
     expect(blocks).toHaveLength(3);
-    const installed = [
-      ".github/workflows/codex-review.yml",
-      ".github/workflows/codex-review-listener.yml",
-      ".github/workflows/codex-review-check.yml",
-    ];
-    installed.forEach((file, i) => {
-      expect(readFileSync(file, "utf8").endsWith(blocks[i]), file).toBe(true);
+    TEMPLATES.forEach((name, i) => {
+      expect(blocks[i], name).toBe(template(name));
     });
+    // Installed here, byte for byte, exactly as a consumer must have them —
+    // this repository is a consumer too, and check_consumer.py holds it to the
+    // same comparison. Except the caller: the hub runs the check directly from
+    // its own CI against its own tree, because a caller would reference the
+    // reusable workflow at `@main` and so validate a pull request against the
+    // previous release rather than against itself.
+    for (const name of TEMPLATES.filter((n) => n !== "codex-review-check.yml")) {
+      expect(readFileSync(`.github/workflows/${name}`, "utf8"), name).toBe(template(name));
+    }
+    expect(existsSync(".github/workflows/codex-review-check.yml")).toBe(false);
   });
 
   it("is installed the way the README says", () => {
@@ -185,19 +194,17 @@ describe("action.yml", () => {
     expect(uses).toEqual([CONSUMER_REF]);
   });
 
-  it("templates exactly what check-consumer.mjs pins", () => {
-    // The README template and the checker's expected directives are the same
-    // thing said twice, and they used to be said nine more times besides —
-    // once per consumer, in four languages, which is how six of them drifted.
-    // So this asserts they agree rather than re-listing the triggers: the
-    // checker is where a trigger is added or removed, and the README is where
-    // it is read. WHY each is what it is lives in docs/CONSUMER.md.
+  it("templates what the checker compares against, not a second copy of it", () => {
+    // The README template and the checker's expected files used to be the
+    // same thing said twice, and nine consumers said it again. templates/ is
+    // now the one copy: the README embeds it, this repository installs it,
+    // and check_consumer.py compares consumers to it. Asserted rather than
+    // assumed, because a README that drifts is an installation instruction
+    // that silently stops matching what the check requires.
     const blocks = [...readme.matchAll(/```yaml\n([\s\S]*?)```/g)].map((m) => m[1]);
-    expect(blocks).toHaveLength(3);
-    const pinned = [SWEEP_DIRECTIVES(), LISTENER_DIRECTIVES(), CALLER_DIRECTIVES()];
-    blocks.forEach((block, i) => {
-      // The template carries no comments, so its lines ARE its directives.
-      expect(directives(block)).toEqual(pinned[i]);
+    expect(blocks).toHaveLength(TEMPLATES.length);
+    TEMPLATES.forEach((name, i) => {
+      expect(blocks[i], name).toBe(template(name));
     });
   });
 

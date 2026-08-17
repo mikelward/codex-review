@@ -8,7 +8,7 @@ hand-written test duplicated in four languages. Both have been pulled here.
 ## The three files
 
 Copy these verbatim. They are identical in every consumer, and
-[`check-consumer.mjs`](../check-consumer.mjs) pins them line for line, so a
+[`check_consumer.py`](../check_consumer.py) compares them byte for byte, so a
 consumer that drifts goes red rather than quietly stopping working.
 
 `.github/workflows/codex-review.yml` — the sweep. See
@@ -30,8 +30,9 @@ jobs:
     uses: mikelward/codex-review/.github/workflows/check-consumer.yml@main
 ```
 
-Then set the ruleset — see [Two ruleset settings](#two-ruleset-settings-and-they-are-load-bearing-together)
-below. Until you do, the status is published and ignored.
+Then set the ruleset — see [Three ruleset settings](#three-ruleset-settings-and-they-are-load-bearing-together)
+below. Until you do, the status is published and ignored and these files are
+unprotected.
 
 ## Why the workflow's shape is what it is
 
@@ -178,12 +179,19 @@ through a pull request, so the suite has run on them; there is simply nowhere
 for a merged change to wait. The failure direction is what keeps it boring — a
 broken sweep leaves `pending`, blocking merges rather than opening them.
 
-## Two ruleset settings, and they are load-bearing together
+## Three ruleset settings, and they are load-bearing together
 
 Neither can be expressed in a workflow file.
 
 1. **Require `codex`.** Until you do, the status is published and ignored. Do
    *not* require `sweep` — see above.
+1. **Require `codex-review-check`.** This is the check that holds the three
+   files above to their templates and proves no other workflow can write the
+   `codex` status. Left advisory, it reports a problem that nothing acts on: a
+   pull request could edit or delete the pinned workflows — including the one
+   that publishes the verdict — and merge with this check red or absent,
+   leaving the gate quietly misconfigured. A check nobody requires is a
+   comment.
 2. **Require branches to be up to date before merging.** Codex's verdict is
    derived from its reaction to the pull request, and the action never reads
    the pull request's base at all. So when the base advances, the reviewed
@@ -196,7 +204,9 @@ Neither can be expressed in a workflow file.
    reaction, clears the status by absence, and starts a fresh sweep through
    `synchronize`.
 
-Requiring (1) without (2) leaves exactly the window (2) closes.
+Requiring (1) without (2) leaves exactly the window (2) closes, and requiring
+either without (3) leaves the files they depend on editable by any pull
+request that turns the check red and merges anyway.
 
 ## Known open window: a reused head
 
@@ -217,18 +227,40 @@ behind `statuses: write`, and a second status writer is worse than the window �
 that configuration existed as a `codex-verdict-reset` workflow and was deleted
 for producing unordered writes.
 
-## What the check refuses to guess at
+## How the check reads your workflows
 
-`check-consumer.mjs` **fails closed** on any permissions notation it cannot
-read as a plain `permissions:` block. That is deliberate, and it is the only
-terminating answer to a game these repositories lost eight times: every round
-of review found another valid YAML spelling of one mapping — `write-all`, a
+[`check_consumer.py`](../check_consumer.py) asks two questions by deliberately
+different means.
+
+**Are the three files above exactly the shipped ones?** Compared byte for byte
+against `templates/`, with no parsing at all. They are identical in every
+consumer, so there is nothing to interpret: the question is not "what does this
+file mean" but "is this the file". That is also why the reasoning lives in this
+document rather than in a header — a header you could edit is a file that can
+drift, and the comparison is exact.
+
+**Can any other workflow write commit statuses?** Your `ci.yml`, `release.yml`
+and the rest differ per repository, so they cannot be pinned, and this is the
+one place a workflow has to be *understood*. It is parsed with PyYAML.
+
+That parser is the whole reason this check is Python. Eight rounds of review
+established that a pattern over YAML is not a reading of YAML — `write-all`, a
 `.yaml` filename, `statuses: "write"`, `"pull_request":`, `"permissions":`, a
 bare sequence dash, a blank line inside a mapping, and the explicit-key form
-(`? permissions` on its own line with `: write-all` beneath it). Patching the
-recognizer for each buys the next, while an author needs only one that has not
-been patched yet.
+(`? permissions` on its own line with `: write-all` beneath it) each got past a
+hand-written check. A parser has no such list to keep up to date.
 
-So the answer to notation N+1 is a red check and a human. If a consumer's
-workflow uses a spelling the check refuses, rewrite it as a plain block — that
-costs a moment, where a silent pass costs the invariant.
+PyYAML rather than an npm package on purpose: `mikelward/codex-review` ships no
+dependencies, which is what lets you trust an unpinned `@main` by reading the
+files it runs. The runner's Python is not a dependency taken on — it is part of
+the image, the way `git` and `bash` are. The cost is that a machine without it
+cannot run the check: GitHub's runners all have it, and locally it is one
+`python3 -m pip install --user pyyaml`.
+
+**Unrecognized values are reported, not interpreted.** PyYAML implements YAML
+1.1, where an unquoted `no` is the boolean false and an unquoted `on` is true,
+while GitHub's own parser is closer to 1.2. None of the keys or values this
+check reads is ambiguous between the two — `permissions`, `jobs`, and the
+levels `read`/`write`/`none` — and anything that comes back as something else
+is reported rather than guessed at. So a version quirk becomes a red check, not
+a wrong answer.

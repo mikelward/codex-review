@@ -12,7 +12,7 @@
 # REQUIRE `codex`. DO NOT REQUIRE `sweep`, and require branches up to date.
 # Both are explained there, and both are load-bearing.
 #
-# check-consumer.mjs pins this file line for line, so an edit here fails until
+# check_consumer.py compares this file byte for byte, so an edit here fails until
 # it is re-approved centrally.
 name: codex-review
 on:

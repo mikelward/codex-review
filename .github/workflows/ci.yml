@@ -78,8 +78,32 @@ jobs:
       - name: Test
         run: node --test *.test.js
 
-      - name: Shellcheck the lane scripts
-        run: shellcheck -s bash -S error scripts/docs-lane.sh scripts/docs-lane.test.sh
+      # The consumer check is Python, so its suite is too -- stdlib unittest,
+      # no packages, in a repository that ships no dependencies.
+      - name: Test the consumer check
+        run: python3 -m unittest check_consumer_test -v
+
+      # This repository is a consumer of itself, so the check runs against its
+      # own tree -- from THIS revision, not from `@main`. Calling the reusable
+      # workflow the way a consumer does would check out the released checker
+      # and templates instead, so a pull request changing either would be
+      # validated against the previous release and never exercise its own
+      # change.
+      - name: Check this repository's own setup
+        run: python3 check_consumer.py .
+
+      # And against real consumer trees, because `templates/` and
+      # check_consumer.py are what nine repositories are held to, and consumers
+      # track `@main`: a merge here reaches their merge gates with no release
+      # step in between. Without this, a template change first meets a real
+      # consumer after it can no longer be stopped.
+      - name: Check the consumers
+        run: scripts/check-consumers.sh
+
+      - name: Shellcheck the scripts
+        run: |
+          shellcheck -s bash -S error scripts/docs-lane.sh scripts/docs-lane.test.sh
+          shellcheck -s sh -S error scripts/check-consumers.sh
 
   # The one check the main ruleset requires. Always runs, always reports —
   # green only when the test job succeeded, or when it was skipped and the

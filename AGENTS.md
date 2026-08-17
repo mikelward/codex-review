@@ -53,9 +53,24 @@ has stopped biting.
 - The safe direction is the default: a broken sweep leaves `pending`, which
   blocks merges rather than letting anything through, so the worst case is
   every consumer's gate stalling until you revert.
-- Sibling repositories (`mesh`, `gedmap`, `conf`, `scripts`) consume this. A
-  change to the action's inputs or its published wording needs their workflows
+- Nine sibling repositories consume this: `conf`, `gedmap`, `lanes`, `mesh`,
+  `root`, `scripts`, `unixtools`, `vcs`, `web`. A change to the action's
+  inputs, its published wording, or `templates/` needs their workflows
   checked, even though none of them has to be edited for an ordinary fix.
+- **Pilot ONE consumer, and pilot it BEFORE the merge.** Never open the same
+  change across the consumers at once. They share one automated reviewer, so a
+  finding against a change made nine times is the same finding nine times --
+  quota spent to learn nothing, and eight more chances to fix it in only some
+  of them. Take one consumer through review, and only copy it out once that
+  has settled.
+  The pre-merge pilot is THIS repository, which is its own first consumer:
+  it installs all three files and `check_consumer.py` holds it to the same
+  comparison, so the change is exercised before it can reach anyone else.
+  Piloting a second consumer by pointing its caller at the branch does not
+  work and should not be attempted -- the caller is pinned byte for byte to a
+  template that says `@main`, so a branch reference is reported as drift,
+  which is the pin doing its job. A second consumer therefore follows the
+  merge, and is where a change gets its first *outside* review.
 
 ## Code style
 
