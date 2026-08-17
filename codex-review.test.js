@@ -16,6 +16,7 @@ import {
   MAX_FAIL_STREAK,
   utc,
   newestIn,
+  input,
 } from "./codex-review.mjs";
 
 describe("verdictFor", () => {
@@ -1649,6 +1650,56 @@ describe("runLoop", () => {
     expect(h.count()).toBe(2);
   });
 
+});
+
+describe("input", () => {
+  const withEnv = (vars, fn) => {
+    const saved = { ...process.env };
+    for (const [k, v] of Object.entries(vars)) process.env[k] = v;
+    try {
+      return fn();
+    } finally {
+      for (const k of Object.keys(vars)) {
+        if (k in saved) process.env[k] = saved[k]; else delete process.env[k];
+      }
+    }
+  };
+
+  it("reads a hyphenated input under the name the runner actually sets", () => {
+    // The runner replaces SPACES with underscores and passes hyphens through,
+    // so `loop-minutes` arrives as INPUT_LOOP-MINUTES. Reading only the
+    // underscored spelling found nothing, `minutes` fell to 0, and every run
+    // swept once instead of looping for the hour. Nothing else caught it:
+    // action.yml's default is applied by the runner, so the value was always
+    // present and always unreadable.
+    expect(withEnv({ "INPUT_LOOP-MINUTES": "55" },
+      () => input("loop-minutes", "SWEEP_LOOP_MINUTES"))).toBe("55");
+  });
+
+  it("still reads the underscored spelling a hand-run would type", () => {
+    // Running the script by hand is the documented way to unstick a verdict,
+    // and INPUT_LOOP_MINUTES is what a person exports.
+    expect(withEnv({ INPUT_LOOP_MINUTES: "5" },
+      () => input("loop-minutes", "SWEEP_LOOP_MINUTES"))).toBe("5");
+  });
+
+  it("prefers the runner's spelling when both are set", () => {
+    expect(withEnv({ "INPUT_LOOP-MINUTES": "55", INPUT_LOOP_MINUTES: "5" },
+      () => input("loop-minutes", "SWEEP_LOOP_MINUTES"))).toBe("55");
+  });
+
+  it("falls back to the standalone env var, then to empty", () => {
+    expect(withEnv({ SWEEP_LOOP_MINUTES: "30" },
+      () => input("loop-minutes", "SWEEP_LOOP_MINUTES"))).toBe("30");
+    expect(input("no-such-input", "NO_SUCH_ENV")).toBe("");
+  });
+
+  it("reads an unhyphenated input, which is why the action worked at all", () => {
+    // `token` and `repository` carry no hyphen, so they resolved correctly
+    // under the old code and the loop bug looked like a scheduling problem.
+    expect(withEnv({ INPUT_REPOSITORY: "owner/name" },
+      () => input("repository", "GITHUB_REPOSITORY"))).toBe("owner/name");
+  });
 });
 
 describe("the published wording", () => {
