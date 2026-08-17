@@ -44,10 +44,12 @@ const classify = (path) => {
 describe("the lane policy", () => {
   it("parses to the intended shape, nothing wider", () => {
     // A rule this suite has not vetted is a rule nothing here exercises —
-    // and the ORDER is part of the shape: README.md is code only because its
-    // rule comes first.
+    // and the ORDER is part of the shape: the contract fixtures are code
+    // only because their rules come first.
     expect(rules).toEqual([
       { verdict: "code", pattern: "README.md" },
+      { verdict: "code", pattern: "AGENTS.md" },
+      { verdict: "code", pattern: "CLAUDE.md" },
       { verdict: "docs", pattern: "**/*.md" },
     ]);
     expect(directives.prefixes).toEqual(["docs"]);
@@ -55,16 +57,20 @@ describe("the lane policy", () => {
   });
 
   it("classifies prose as docs, at the root and nested", () => {
-    for (const path of ["AGENTS.md", "TODO.md", "docs/CONSUMER.md"]) {
+    for (const path of ["TODO.md", "docs/CONSUMER.md"]) {
       expect(classify(path), path).toBe("docs");
     }
   });
 
-  it("classifies README.md as code — a contract fixture, not prose", () => {
-    // It embeds the consumer workflow templates action.test.js pins the
-    // installed workflows to, so an edit there can change what the suite
-    // requires — a README edit must run it.
-    expect(classify("README.md")).toBe("code");
+  it("classifies the contract fixtures as code, not prose", () => {
+    // README.md embeds the consumer workflow templates action.test.js pins
+    // the installed workflows to; AGENTS.md carries the consumer list the
+    // suite derives the check-consumers sweep from (CLAUDE.md is AGENTS.md
+    // by symlink). An edit to any of them can change what the suite
+    // requires, so each must run it.
+    for (const path of ["README.md", "AGENTS.md", "CLAUDE.md"]) {
+      expect(classify(path), path).toBe("code");
+    }
   });
 
   it("classifies everything a consumer runs as code", () => {
