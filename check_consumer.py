@@ -73,6 +73,50 @@ except ImportError:  # pragma: no cover - the message is the behavior
 
 HERE = Path(__file__).resolve().parent
 
+
+class _StrictLoader(yaml.SafeLoader):
+    """safe_load, except duplicate mapping keys are an error.
+
+    PyYAML silently keeps the LAST duplicate key, so a workflow with two
+    ``permissions:`` blocks would be judged only on the second. GitHub's own
+    parser rejects such a file today, which keeps the direction safe — but
+    that safety would live in GitHub's parser, not here, and this check's
+    principle is to report what it cannot be sure of rather than inherit
+    someone else's refusal.
+    """
+
+
+def _mapping_without_duplicates(loader, node, deep=False):
+    # A scalar key compares by its RAW TEXT, not `construct_object`'s parsed
+    # value: PyYAML implements YAML 1.1, where `on`, `On`, `yes`, and `y` all
+    # resolve to the same Python `True`, while GitHub's own parser is closer
+    # to 1.2 and reads each as a distinct string. Coercing them together
+    # would report a workflow's genuinely different keys (`on:` alongside an
+    # `env:` entry literally named `yes:`, say) as a duplicate that does not
+    # exist on GitHub's side — the same version-skew guard `judge` already
+    # documents for permission values, applied here too. Non-scalar keys
+    # (rare in workflow YAML) fall back to the parsed value; nothing this
+    # check cares about hangs on distinguishing those.
+    seen = set()
+    for key_node, _ in node.value:
+        key = key_node.value if isinstance(key_node, yaml.ScalarNode) else loader.construct_object(key_node, deep=deep)
+        if key in seen:
+            raise yaml.YAMLError(f"duplicate mapping key {key!r}")
+        seen.add(key)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep)
+
+
+_StrictLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping_without_duplicates
+)
+
+
+def parse_workflow(text):
+    """The one YAML entry point: every parse failure lands in the caller's
+    fail-closed "could not be parsed" report."""
+    return yaml.load(text, Loader=_StrictLoader)
+
+
 SWEEP = "codex-review.yml"
 LISTENER = "codex-review-listener.yml"
 CALLER = "codex-review-check.yml"
@@ -356,7 +400,7 @@ def check_consumer(root=".", templates_root=None, notices=None):
         if name == SWEEP:
             continue
         try:
-            doc = yaml.safe_load((workflows / name).read_text())
+            doc = parse_workflow((workflows / name).read_text())
         except yaml.YAMLError as error:
             # Fail closed: a question that could not be asked is not a question
             # answered "no".
