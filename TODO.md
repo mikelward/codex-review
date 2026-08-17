@@ -6,6 +6,63 @@ Guesses made under autopilot, recorded here so nothing decided without the
 repository owner silently becomes permanent. Each says what was decided, what
 the alternative was, and why it is reversible.
 
+### A 👍 no longer outranks strictly newer findings on the same head
+
+**Decided (2026-08-17, security pass):** the reaction now approves only when
+it is strictly newer than Codex's last written word on the head (`judge`
+compares `approvedAt` against the newest review/comment time, the same
+latest-word test the clean comment already got). Before, a standing 👍
+outranked a findings review that arrived AFTER it — Codex provably revokes
+the reaction on push, not on a later findings pass, so the leftover 👍 could
+hand auto-merge a `success` with an unaddressed finding standing. A tie
+fails closed, matching the nudge-tie rule.
+
+**Alternative:** keep the standing order and rely on Codex removing its 👍
+when it posts findings. This file's own history documents Codex not keeping
+its reaction promises, which is why the comment channel got `cleanIsLatest`
+first.
+
+**Reversible:** one condition in `judge` plus three tests; the fix-and-nudge
+round (old findings, fresh 👍) still approves, and a test pins it.
+
+### matchesBot requires type evidence for the bare login spelling — on REST only
+
+**Decided (2026-08-17, security pass; revised 2026-08-18 after Codex
+review):** the suffixed spelling (`…[bot]`) certifies itself — brackets are
+illegal in usernames — but the bare spelling needs the account type to say
+Bot. The first pass asked for that evidence on every channel, including
+GraphQL's `Reaction.user`; Codex correctly flagged that field as declared
+the concrete `User` type rather than the polymorphic `Actor` interface, so
+its `__typename` is a schema constant ("User") for every reactor, bot or
+human — the check could never pass, which would have silently blocked
+Codex's own clean-pass 👍 on every consumer forever. `matchesBot` (type
+evidence required) is now for REST-sourced actors only — review and comment
+authors, where `user.type` is real; `matchesBotLogin` (login only, no type
+evidence) covers the GraphQL reaction, with the residual risk — a
+same-named human account forging a reaction — named at its definition.
+
+**Alternative:** trust GitHub's squatting protections, which are policy,
+not API guarantee, on every channel including the one that cannot be
+hardened without breaking it.
+
+**Reversible:** the two functions and the query strings; fixtures using the
+suffixed spelling never notice either way.
+
+### AGENTS.md moved to the code lane
+
+**Decided (2026-08-17, security pass):** `.github/lanes.conf` now sends
+AGENTS.md (and the CLAUDE.md symlink) down the code lane, because
+`action.test.js` derives the swept-consumer list from AGENTS.md's
+sibling-repositories sentence — a markdown-only PR editing that list used
+to skip the suite, deferring the AGENTS.md ↔ `check-consumers.sh`
+cross-check to a confusing red on the next code-lane PR. Same argument that
+put README.md there.
+
+**Alternative:** keep it housekeeping and accept the deferred red — fail
+closed either way, just later and more confusingly.
+
+**Reversible:** two policy lines and the lanes-policy test fixtures.
+
 ### Naming a sibling repo's pull request in a test comment
 
 **Decided:** replaced `simmo#216` with "a sibling repo's pull request" in the
