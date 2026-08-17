@@ -53,7 +53,21 @@
 // Exits 0 when the consumer is correct, 1 with a report when it is not.
 
 import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * A shipped template's exact bytes.
+ *
+ * templates/ is the single copy of each consumer file. The directive lists
+ * below are derived from it rather than repeating it, so there is one place a
+ * trigger is added or removed -- the README, this checker and nine consumers
+ * saying the same thing eleven times is what this whole change is undoing.
+ */
+export const template = (name) =>
+  readFileSync(join(here, "templates", name), "utf8");
 
 /** The sweep, as every consumer must have it. */
 export const SWEEP = "codex-review.yml";
@@ -63,78 +77,16 @@ export const LISTENER = "codex-review-listener.yml";
 export const CALLER = "codex-review-check.yml";
 
 /**
- * The sweep's directives, in order.
+ * Each file's directives, derived from its template.
  *
- * These are identical in every consumer, which is what makes pinning them
- * here rather than nine times the whole point of this file. The reasoning for
- * each line is in docs/CONSUMER.md, not in nine copies of a comment block.
+ * Functions rather than constants so the template is read once per call and
+ * never goes stale against the file on disk.
  */
-export const SWEEP_DIRECTIVES = [
-  "name: codex-review",
-  "on:",
-  "  schedule:",
-  "    - cron: '23 * * * *'",
-  "  pull_request_target:",
-  "    types: [opened, reopened, ready_for_review, synchronize, edited, closed]",
-  "  issue_comment:",
-  "    types: [created, edited]",
-  "  pull_request_review_comment:",
-  "    types: [created, edited]",
-  "  workflow_run:",
-  "    workflows: [codex-review-listener]",
-  "    types: [completed]",
-  "permissions:",
-  "  contents: read",
-  "  pull-requests: read",
-  "  checks: read",
-  "  statuses: write",
-  "concurrency:",
-  "  group: codex-review",
-  "  cancel-in-progress: false",
-  "jobs:",
-  "  sweep:",
-  "    runs-on: ubuntu-latest",
-  "    timeout-minutes: 65",
-  "    steps:",
-  "      - uses: mikelward/codex-review@main",
-];
+export const SWEEP_DIRECTIVES = () => directives(template(SWEEP));
 
-/** The listener's directives, in order. */
-export const LISTENER_DIRECTIVES = [
-  "name: codex-review-listener",
-  "on:",
-  "  pull_request_review:",
-  "    types: [submitted, edited, dismissed]",
-  "permissions: {}",
-  "jobs:",
-  "  heard:",
-  "    runs-on: ubuntu-latest",
-  "    timeout-minutes: 5",
-  "    steps:",
-  "      - run: 'true'",
-];
+export const LISTENER_DIRECTIVES = () => directives(template(LISTENER));
 
-/**
- * The caller's directives, in order.
- *
- * Pinned like the other two, and for a reason worth stating: without it a
- * consumer could delete or neuter the file that runs this check and nothing
- * would object, since the thing that would object is what was deleted. Pinning
- * it means that whenever the check does run, it verifies its own invocation --
- * and a consumer that removes it has no green `codex-review-check` for its
- * ruleset to require.
- */
-export const CALLER_DIRECTIVES = [
-  "name: codex-review-check",
-  "on:",
-  "  push:",
-  "  pull_request:",
-  "permissions:",
-  "  contents: read",
-  "jobs:",
-  "  check:",
-  "    uses: mikelward/codex-review/.github/workflows/check-consumer.yml@main",
-];
+export const CALLER_DIRECTIVES = () => directives(template(CALLER));
 
 /**
  * Both extensions GitHub accepts for a workflow.
@@ -280,9 +232,9 @@ export function checkConsumer(root = ".") {
   // The pins. A diff is reported line by line so a failure names what moved,
   // rather than only saying the file is wrong.
   for (const [name, expected] of [
-    [SWEEP, SWEEP_DIRECTIVES],
-    [LISTENER, LISTENER_DIRECTIVES],
-    [CALLER, CALLER_DIRECTIVES],
+    [SWEEP, SWEEP_DIRECTIVES()],
+    [LISTENER, LISTENER_DIRECTIVES()],
+    [CALLER, CALLER_DIRECTIVES()],
   ]) {
     if (!files.includes(name)) {
       say(

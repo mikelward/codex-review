@@ -40,9 +40,9 @@ const consumer = (workflows) => {
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 };
 
-const SWEEP_TEXT = `${SWEEP_DIRECTIVES.join("\n")}\n`;
-const LISTENER_TEXT = `${LISTENER_DIRECTIVES.join("\n")}\n`;
-const CALLER_TEXT = `${CALLER_DIRECTIVES.join("\n")}\n`;
+const SWEEP_TEXT = `${SWEEP_DIRECTIVES().join("\n")}\n`;
+const LISTENER_TEXT = `${LISTENER_DIRECTIVES().join("\n")}\n`;
+const CALLER_TEXT = `${CALLER_DIRECTIVES().join("\n")}\n`;
 
 /** A third workflow, correct: declares its own block, grants no write. */
 const CI_TEXT = `name: CI
@@ -93,7 +93,7 @@ describe("a correct consumer", () => {
     // Consumers carry a header above each stanza, and it has to be free to
     // discuss the very phrases this checker looks for — `statuses: write`
     // appears in the shipped header several times.
-    const commented = `# A header that says statuses: write and workflow_dispatch\n\n${SWEEP_DIRECTIVES.join(
+    const commented = `# A header that says statuses: write and workflow_dispatch\n\n${SWEEP_DIRECTIVES().join(
       "\n\n# an interleaved note\n",
     )}\n`;
     assert.deepEqual(
