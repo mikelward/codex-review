@@ -5,6 +5,7 @@ import {
   PENDING,
   FINDINGS,
   matchesBot,
+  matchesBotLogin,
   readReactions,
   findingsOn,
   commentSignals,
@@ -333,16 +334,51 @@ describe("utc", () => {
 });
 
 describe("matchesBot", () => {
-  it("matches with or without the [bot] suffix", () => {
+  it("matches the suffixed spelling on its own — brackets are illegal in usernames", () => {
     expect(matchesBot(`${CODEX_BOT}[bot]`)).toBe(true);
-    expect(matchesBot(CODEX_BOT)).toBe(true);
+    expect(matchesBot({ login: `${CODEX_BOT}[bot]` })).toBe(true);
+  });
+
+  it("matches the bare spelling only with REST's user.type saying Bot", () => {
+    // App slugs and usernames are separate namespaces: a HUMAN registered
+    // under the bot's name must not inherit its verdict authority. No type
+    // on a bare login fails closed. __typename is deliberately NOT checked
+    // here — matchesBot is for REST-sourced actors only; see matchesBotLogin
+    // for why a GraphQL Reaction.user can never carry real type evidence.
+    expect(matchesBot({ login: CODEX_BOT, type: "Bot" })).toBe(true);
+    expect(matchesBot({ login: CODEX_BOT, type: "User" })).toBe(false);
+    expect(matchesBot({ login: CODEX_BOT, __typename: "Bot" })).toBe(false);
+    expect(matchesBot(CODEX_BOT)).toBe(false);
+    expect(matchesBot({ login: CODEX_BOT })).toBe(false);
   });
 
   it("rejects anyone else, and a missing login", () => {
     // The reaction is only a verdict because Codex revokes it on push;
     // a human's 👍 carries no such guarantee.
     expect(matchesBot("someone-else")).toBe(false);
+    expect(matchesBot({ login: "someone-else[bot]" })).toBe(false);
     expect(matchesBot(undefined)).toBe(false);
+  });
+});
+
+describe("matchesBotLogin", () => {
+  // GraphQL's Reaction.user is declared as the concrete User type, not the
+  // polymorphic Actor interface — its __typename is a schema constant
+  // ("User") for every reactor, so no type evidence can ever exist on this
+  // one channel. A same-named human account forging a reaction is the
+  // accepted residual risk here; this is why readReactions uses this check
+  // and not matchesBot for the GraphQL nodes it reads.
+  it("matches the bare spelling with no type evidence required", () => {
+    expect(matchesBotLogin(CODEX_BOT)).toBe(true);
+  });
+
+  it("matches the suffixed spelling too", () => {
+    expect(matchesBotLogin(`${CODEX_BOT}[bot]`)).toBe(true);
+  });
+
+  it("rejects anyone else, and a missing login", () => {
+    expect(matchesBotLogin("someone-else")).toBe(false);
+    expect(matchesBotLogin(undefined)).toBe(false);
   });
 });
 
@@ -851,6 +887,49 @@ describe("sweep", () => {
     const out = await runFull(fake);
     expect(out.awaiting).toBe(0);
     expect(out.written[0].state).toBe("success");
+  });
+
+  it("stops approving when findings land after the 👍 on the same head", async () => {
+    // The reaction channel's version of the clean-comment ordering bug: a
+    // standing 👍, then a findings review naming the SAME head. Codex
+    // provably revokes the reaction on push, not on a later findings pass,
+    // so the leftover 👍 must not outrank the newer written word — honoring
+    // it would hand auto-merge a success with an unaddressed finding.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      prReviews: { 1: [review("abc1234", undefined, "2026-08-14T12:09:00Z")] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+    });
+    const out = await runFull(fake);
+    expect(out.written[0].description).toBe(FINDINGS);
+  });
+
+  it("keeps approving on a 👍 newer than the findings it answers", async () => {
+    // The fix-and-nudge round the standing order exists for: the old review
+    // still names this head, and the fresh 👍 is Codex saying it is
+    // satisfied. Recency is what separates this from the leftover above.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      checkSuites: { abc1234: [bornSuite()] },
+      prReviews: { 1: [review()] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs(undefined, "2026-08-14T12:15:00Z")]) })])],
+    });
+    const out = await runFull(fake);
+    expect(out.awaiting).toBe(0);
+    expect(out.written[0].state).toBe("success");
+  });
+
+  it("fails closed when the 👍 and the findings share a second", async () => {
+    // GitHub stamps to the second, so a tie is an unresolved ordering —
+    // the same rule the nudge tie follows: ambiguity must not be what
+    // opens the gate.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      prReviews: { 1: [review()] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+    });
+    const out = await runFull(fake);
+    expect(out.written[0].description).toBe(FINDINGS);
   });
 
   it("honors a 👍 that arrived before the sweep's own first status", async () => {

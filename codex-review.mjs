@@ -130,8 +130,45 @@ export const MAX_FAIL_STREAK = 5;
 export const UNANSWERED_MINUTES = 30;
 
 const stripBot = (login) => String(login ?? "").replace(/\[bot\]$/, "");
-export const matchesBot = (login, botLogin = CODEX_BOT) =>
-  stripBot(login) === stripBot(botLogin);
+
+/**
+ * Is this login Codex's, spelled either way REST or GraphQL use? Login only
+ * — no type evidence asked for or required.
+ *
+ * The one legitimate use is a GraphQL `Reaction.user`: that field is
+ * declared as the concrete `User` type, not the polymorphic `Actor`
+ * interface, so `__typename` queried on it is a SCHEMA CONSTANT — "User"
+ * for every reactor, bot or human, because a non-polymorphic field's
+ * `__typename` can never be anything else. Requiring `Bot` there does not
+ * harden the reaction channel; it silences it, permanently, for exactly the
+ * clean-pass 👍 that is Codex's most common answer. A same-named human
+ * account forging a reaction is the accepted residual risk on this one
+ * channel — `matchesBot` below is the check for channels (REST reviews and
+ * comments) where the account type is real, queryable evidence.
+ */
+export const matchesBotLogin = (login, botLogin = CODEX_BOT) => stripBot(login) === stripBot(botLogin);
+
+/**
+ * Is this actor Codex? Takes the whole user object where the caller has one.
+ * For REST-sourced actors ONLY (review and comment authors) — see
+ * `matchesBotLogin` for GraphQL reactions, where no type evidence exists.
+ *
+ * The login alone is not enough for the bare spelling: app slugs and
+ * usernames are separate namespaces, so a HUMAN account named like the bot
+ * is a registration away from inheriting its verdict authority — clean
+ * comments, reviews, all of it. The suffixed spelling is self-certifying
+ * (brackets are illegal in usernames); the bare spelling must arrive with
+ * REST's `user.type` saying Bot. No type on a bare login fails closed — a
+ * Codex signal misread as a stranger's costs a pending, the reverse costs
+ * the gate.
+ */
+export const matchesBot = (user, botLogin = CODEX_BOT) => {
+  const login = typeof user === "string" ? user : user?.login;
+  if (!matchesBotLogin(login, botLogin)) return false;
+  if (/\[bot\]$/.test(String(login ?? ""))) return true;
+  const type = typeof user === "string" ? null : user?.type;
+  return type === "Bot";
+};
 
 /**
  * Normalize a timestamp to a UTC "Z" string, or null.
@@ -192,7 +229,7 @@ export const newestIn = (connection) =>
 export function findingsOn(reviews, headRefOid, since = null) {
   let at = null;
   for (const r of reviews ?? []) {
-    if (!matchesBot(r.user?.login) || r.commit_id !== headRefOid) continue;
+    if (!matchesBot(r.user) || r.commit_id !== headRefOid) continue;
     const t = utc(r.submitted_at) ?? "";
     // A review older than `since` read a different diff. The commit id ties
     // a review to the head, which is enough while the head is the only
@@ -281,7 +318,7 @@ export function commentSignals(comments, { since, owner, head }) {
   if (!bound) return { codexAt, nudgeAt, cleanAt };
   for (const c of comments ?? []) {
     const at = utc(c.created_at) ?? "";
-    if (matchesBot(c.user?.login)) {
+    if (matchesBot(c.user)) {
       // Codex's word stays on created_at: its edits do not re-answer, and a
       // later timestamp here could only mask a nudge — the fail-open way.
       if (at <= bound) continue;
@@ -463,7 +500,10 @@ export function verdictFor({
 
   // Approval outranks findings on purpose: after a fix-and-nudge round the
   // old review still names this head, and the fresh 👍 is Codex saying it is
-  // satisfied. Reading outranks both — a re-read is the verdict changing.
+  // satisfied. The caller only sets `approved` when the 👍 is strictly newer
+  // than Codex's last written word on the head (see `judge`), so the standing
+  // order here never lets a leftover reaction outrank findings that came
+  // after it. Reading outranks both — a re-read is the verdict changing.
   if (findings) return { state: "pending", description: FINDINGS };
 
   return { state: "pending", description: PENDING };
@@ -578,7 +618,9 @@ export function readReactions(nodes, { since, owner } = {}) {
   const bound = utc(since);
   for (const r of nodes ?? []) {
     const login = r.user?.login;
-    const codex = matchesBot(login);
+    // matchesBotLogin, not matchesBot: this is GraphQL's Reaction.user,
+    // concretely typed User — no __typename it carries can ever say Bot.
+    const codex = matchesBotLogin(login);
     const at = utc(r.createdAt) ?? "";
     // A missing bound or reaction time both mean "cannot show this reaction
     // is about this head", and the answer to that is `pending` rather than a
@@ -968,7 +1010,20 @@ export async function sweep({
       const answeredElsewhereAt = laterOf(reviewedAt, codexAt);
       const cleanIsLatest = Boolean(signals.cleanAt)
         && (answeredElsewhereAt === null || signals.cleanAt > answeredElsewhereAt);
-      cleanlyApproved = approved || cleanIsLatest;
+      // The 👍 gets the same latest-word test as the clean comment. The
+      // reaction can outrank an OLDER findings review — after a fix-and-nudge
+      // round Codex re-adds it to say it is satisfied — but only recency
+      // makes that safe: Codex provably revokes the reaction on push, not
+      // when it later posts findings on the SAME head, so a 👍 older than
+      // Codex's last written word may be a leftover those findings
+      // superseded, and honoring it would hand auto-merge a success with an
+      // unaddressed finding standing. A tie is an unresolved ordering —
+      // GitHub stamps to the second — and ambiguity must not be what opens
+      // the gate, the same rule the nudge tie already follows.
+      const approvedIsLatest = approved
+        && (answeredElsewhereAt === null
+          || (approvedAt !== null && approvedAt > answeredElsewhereAt));
+      cleanlyApproved = approvedIsLatest || cleanIsLatest;
       findings = !cleanlyApproved && Boolean(answeredAt) && !nudged;
     }
     const verdict = verdictFor({
