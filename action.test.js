@@ -14,6 +14,12 @@
 // the files it runs. A parser would be the first thing to break that.
 import { describe, it, expect } from "./vitest-shim.mjs";
 import { readFileSync, existsSync } from "node:fs";
+import {
+  directives,
+  SWEEP_DIRECTIVES,
+  LISTENER_DIRECTIVES,
+  CALLER_DIRECTIVES,
+} from "./check-consumer.mjs";
 
 const manifest = readFileSync("action.yml", "utf8");
 const script = readFileSync("codex-review.mjs", "utf8");
@@ -153,17 +159,21 @@ describe("action.yml", () => {
 
   it("is installed on this repository, verbatim from the template", () => {
     // The self-install's whole claim is that what runs HERE is the README's
-    // consumer template; this is the assertion behind the claim, so drift
-    // in the installed triggers, permissions, or action reference goes red
+    // consumer template; this is the assertion behind the claim, so drift in
+    // the installed triggers, permissions, or action reference goes red
     // instead of quietly diverging from what consumers are told to copy.
-    // The sweep file carries a short leading comment naming why the action
-    // is installed on itself, so it must END with the block; the listener
-    // is the block, byte for byte.
+    // Each file carries a short leading comment saying what it is and
+    // pointing at docs/CONSUMER.md, so each must END with its block.
     const blocks = [...readme.matchAll(/```yaml\n([\s\S]*?)```/g)].map((m) => m[1]);
-    const sweep = readFileSync(".github/workflows/codex-review.yml", "utf8");
-    const listener = readFileSync(".github/workflows/codex-review-listener.yml", "utf8");
-    expect(sweep.endsWith(blocks[0])).toBe(true);
-    expect(listener).toBe(blocks[1]);
+    expect(blocks).toHaveLength(3);
+    const installed = [
+      ".github/workflows/codex-review.yml",
+      ".github/workflows/codex-review-listener.yml",
+      ".github/workflows/codex-review-check.yml",
+    ];
+    installed.forEach((file, i) => {
+      expect(readFileSync(file, "utf8").endsWith(blocks[i]), file).toBe(true);
+    });
   });
 
   it("is installed the way the README says", () => {
@@ -175,45 +185,20 @@ describe("action.yml", () => {
     expect(uses).toEqual([CONSUMER_REF]);
   });
 
-  it("templates every trigger a verdict can arrive through, and no unsafe one", () => {
-    // The template is copied into consumers by hand, so a trigger dropped here
-    // is a delivery form no future consumer hears — findings submitted as a
-    // review with no inline comments emit only `pull_request_review`, which is
-    // exactly the kind of quiet gap the listener exists to close. And the
-    // unsafe direction is quieter still: `workflow_dispatch` runs the workflow
-    // file from a caller-chosen ref, and `pull_request` AND
-    // `pull_request_review` from the merge ref, so any of them appearing on
-    // the SWEEP hands a branch the `statuses: write` steps. The merge-ref
-    // event therefore lives on the unprivileged listener, relayed to the
-    // sweep by `workflow_run`, whose definition GitHub always takes from the
-    // default branch. Prove the extraction found both blocks before asserting.
+  it("templates exactly what check-consumer.mjs pins", () => {
+    // The README template and the checker's expected directives are the same
+    // thing said twice, and they used to be said nine more times besides —
+    // once per consumer, in four languages, which is how six of them drifted.
+    // So this asserts they agree rather than re-listing the triggers: the
+    // checker is where a trigger is added or removed, and the README is where
+    // it is read. WHY each is what it is lives in docs/CONSUMER.md.
     const blocks = [...readme.matchAll(/```yaml\n([\s\S]*?)```/g)].map((m) => m[1]);
-    expect(blocks).toHaveLength(2);
-    const [sweep, listener] = blocks;
-
-    const on = sweep.match(/^on:\n([\s\S]*?)\n\npermissions:/m)?.[1];
-    expect(typeof on).toBe("string");
-    expect(on).toMatch(/schedule:\n\s+- cron: '23 \* \* \* \*'/);
-    expect(on).toMatch(/pull_request_target:\n\s+types: \[opened, reopened, ready_for_review, synchronize, closed\]/);
-    expect(on).toMatch(/issue_comment:\n\s+types: \[created, edited\]/);
-    expect(on).toMatch(/pull_request_review_comment:\n\s+types: \[created, edited\]/);
-    expect(on).toMatch(/workflow_run:\n\s+workflows: \[codex-review-listener\]\n\s+types: \[completed\]/);
-    expect(on).not.toMatch(/workflow_dispatch/);
-    expect(on).not.toMatch(/\bpull_request:/);
-    expect(on).not.toMatch(/pull_request_review:/);
-
-    // The listener: hears the merge-ref event, holds nothing worth stealing.
-    // Its `name:` is what the sweep's workflow_run trigger matches on, so the
-    // pair is asserted together — renaming one without the other severs the
-    // relay silently.
-    expect(listener).toMatch(/^name: codex-review-listener$/m);
-    expect(listener).toMatch(/pull_request_review:\n\s+types: \[submitted, edited, dismissed\]/);
-    // The prose in its header names `statuses: write` as the thing it must
-    // never hold, so the negative assertion targets the GRANT shape — a
-    // permissions key — not the word.
-    expect(listener).toMatch(/^permissions: \{\}$/m);
-    expect(listener).not.toMatch(/statuses:\s*(write|read)/);
-    expect(listener).not.toMatch(/secrets:/);
+    expect(blocks).toHaveLength(3);
+    const pinned = [SWEEP_DIRECTIVES, LISTENER_DIRECTIVES, CALLER_DIRECTIVES];
+    blocks.forEach((block, i) => {
+      // The template carries no comments, so its lines ARE its directives.
+      expect(directives(block)).toEqual(pinned[i]);
+    });
   });
 
   it("documents the verdict-read protocol, every source by name", () => {
