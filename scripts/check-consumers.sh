@@ -62,6 +62,11 @@ failed=0
 reachable=0
 checked=0
 skipped=""
+# One line per consumer still on an outgoing shape, naming the label it
+# matched. Per label, because migrations can overlap: a single counter would
+# let an unrelated active migration keep a finished one's shape alive.
+matched="$WORK/matched"
+: > "$matched"
 
 for name in $CONSUMERS; do
     if test -n "$SIBLINGS"; then
@@ -94,9 +99,15 @@ for name in $CONSUMERS; do
 
     checked=$((checked + 1))
     echo "== $name"
-    if ! python3 "$HERE/check_consumer.py" "$repo"; then
+    if ! python3 "$HERE/check_consumer.py" "$repo" > "$WORK/out"; then
         failed=1
     fi
+    cat "$WORK/out"
+    # A `notice:` naming a superseded shape means this consumer has not
+    # migrated yet, which is what keeps THAT shape alive below. The label is
+    # recorded rather than just counted, so one migration ending is visible
+    # while another is still running.
+    sed -n 's/^notice:.*superseded shape `\([^`]*\)`.*/\1/p' "$WORK/out" >> "$matched"
 done
 
 echo
@@ -115,6 +126,63 @@ test -z "$skipped" || echo "skipped:$skipped"
 if test "$reachable" -eq 0; then
     echo "FAIL: no consumer tree could be read; this job verified nothing"
     exit 1
+fi
+
+# A migration that is OVER but still offered is the mechanism's own failure
+# mode, and it is silent: everything stays green while the pin quietly accepts
+# two shapes forever, eroding the byte-for-byte comparison one migration at a
+# time. This is the one place that can tell finished from active, because it is
+# the only thing that knows which consumers still match which outgoing shape.
+#
+# Judged PER LABEL, since two migrations can be in flight at once: a shared
+# counter would report "some consumer is still on some old shape" and let a
+# finished shape live on behind an unrelated one that has only just started.
+# A label fires only when it is offered, at least one consumer was actually
+# checked, and NONE of them matched THAT label -- so it stays quiet for the
+# whole of a real migration, including the moment it starts, when every
+# consumer still matches. A static "the directory must not exist" assertion
+# cannot do this: it would go red on the very commit that opens a migration,
+# which is the deadlock templates/superseded/ exists to remove.
+superseded="$HERE/templates/superseded"
+if test -d "$superseded" && test "$checked" -gt 0; then
+    # Ask the checker which labels it OFFERS rather than globbing them here.
+    # Two enumerations of the same directory disagree at the edges -- a shell
+    # `*/` skips a dot-prefixed name that Python's iterdir() returns -- and a
+    # shape the checker accepts but this guard never looks at stays offered
+    # forever with nothing to say so, which is the silent failure the guard
+    # exists to catch. One source of truth removes the whole class.
+    # sys.path is set explicitly because `python3 -c` puts the CALLER's
+    # directory first, so a check_consumer.py beside whoever ran this would
+    # win over the one being tested -- and answer "no shapes at all", which
+    # reads as a clean run.
+    if ! python3 -c 'import sys
+sys.path.insert(0, sys.argv[1])
+import check_consumer
+for label in check_consumer.superseded_shapes():
+    print(label)' "$HERE" > "$WORK/labels"; then
+        echo "FAIL: could not list the superseded shapes"
+        exit 1
+    fi
+
+    : > "$WORK/finished"
+    while IFS= read -r label; do
+        test -n "$label" || continue
+        # -e, because a label is data: `-legacy` without it is read as
+        # options, and the shape it names is reported finished while a
+        # consumer is still on it.
+        grep -qxF -e "$label" "$matched" || printf '%s\n' "$label" >> "$WORK/finished"
+    done < "$WORK/labels"
+
+    if test -s "$WORK/finished"; then
+        echo
+        echo "FAIL: no checked consumer is on these superseded shapes any more,"
+        echo "      but they are still offered:"
+        sed 's/^/        /' "$WORK/finished"
+        echo "      Those migrations are over. Delete their directories under"
+        echo "      templates/superseded/ -- leaving one means the pin accepts"
+        echo "      more than one shape indefinitely."
+        failed=1
+    fi
 fi
 
 echo "read $reachable consumer(s), checked $checked"

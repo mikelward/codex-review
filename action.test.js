@@ -310,7 +310,7 @@ describe("action.yml", () => {
     expect([...named].sort()).toEqual([...listed].sort());
   });
 
-  it("makes the consumer check dispatchable, and records the shape it replaced", () => {
+  it("makes the consumer check dispatchable, and is not mid-migration", () => {
     // `workflow_dispatch` is here for one reason: a pull request created by
     // GITHUB_TOKEN triggers neither `push` nor `pull_request_target` --
     // GitHub's loop-prevention rule -- so a repository whose dependency
@@ -328,35 +328,37 @@ describe("action.yml", () => {
     expect(caller).toMatch(/permissions:\n {2}contents: read\n/);
     expect(caller).not.toMatch(/statuses:/);
 
-    // And the migration this created, recorded whole. Every file, because a
-    // shape is matched as a set -- an incomplete label fails by name.
-    const shape = "templates/superseded/push-only";
-    for (const name of TEMPLATES) {
-      expect(existsSync(`${shape}/${name}`)).toBe(true);
-    }
-    // The outgoing caller is the current one minus the new trigger. Asserted
-    // rather than assumed: a superseded copy identical to the current one
-    // would be a migration that migrates nothing, and every consumer would
-    // read as current while nothing had moved.
-    const outgoing = readFileSync(`${shape}/codex-review-check.yml`, "utf8");
-    expect(outgoing).not.toMatch(/workflow_dispatch/);
-    expect(outgoing === caller).toBe(false);
-    // The other two are unchanged by this migration, which is what makes the
-    // label a snapshot rather than an edit.
-    expect(readFileSync(`${shape}/codex-review.yml`, "utf8")).toBe(template("codex-review.yml"));
-    expect(readFileSync(`${shape}/codex-review-listener.yml`, "utf8")).toBe(
-      template("codex-review-listener.yml"),
-    );
-
     // And the reason, written where a consumer meets it. A trigger nobody can
     // explain is one a later tidy-up removes, and removing this one blocks
-    // every bot-authored pull request the day the check is required.
+    // every bot-authored pull request the day the check is required. This is
+    // published behavior rather than anything about migrations, so it is
+    // asserted here whatever the pin's state.
     const doc = readFileSync("docs/CONSUMER.md", "utf8");
     expect(doc).toMatch(/GITHUB_TOKEN` triggers no `on: pull_request`/);
     expect(doc).toMatch(/gh workflow run codex-review-check\.yml/);
     expect(doc).toMatch(/actions: write/);
     // Including the asymmetry with the sweep, which must not take it.
     expect(doc).toMatch(/the sweep deliberately does \*\*not\*\* take this trigger/);
+
+    // The state of the pin itself is NOT asserted here, and the reason is
+    // worth writing down because the obvious assertion is wrong.
+    //
+    // A finished migration left in place is a real failure mode -- silent,
+    // costing nothing visible, quietly leaving the pin accepting two shapes
+    // forever. But "templates/superseded must not exist" cannot be the guard:
+    // a migration STARTS by adding that directory in the same commit that
+    // edits the template, so a static absence check goes red on the opening
+    // commit, which cannot merge, so consumers can never move -- exactly the
+    // deadlock templates/superseded/ exists to remove.
+    //
+    // Only one thing can tell a finished migration from an active one: which
+    // consumers still match the outgoing shape. scripts/check-consumers.sh
+    // knows that and nothing here does, so the check lives there -- and is
+    // tested there too, in check-consumers.test.js, by running the script over
+    // synthetic hubs rather than by matching its source text. A string match
+    // from this side would stay green if the script kept the strings and
+    // stopped setting `failed`, which is the false pass this suite is most at
+    // risk of.
   });
 
   it("documents the template-migration mechanism a consumer will meet", () => {

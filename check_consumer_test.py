@@ -547,6 +547,40 @@ class SupersededShapes(ConsumerCase):
         self.assertProblem(problems, "`push-only` is incomplete")
         self.assertProblem(problems, "matched whole")
 
+    def test_a_label_that_would_break_the_notice_channel_is_an_authoring_error(self):
+        # A label is quoted into the `notice:` line, and the hub's sweep reads
+        # it back out of that line to decide which migrations are still under
+        # way. A backtick truncates that read, so the sweep looks for a label
+        # nobody is on and calls a live migration finished -- which tells a
+        # maintainer to delete a shape people are still using. Reported by name
+        # rather than accepted, since labels are authored here by hand.
+        root = self.templates(self.current, {"push`only": self.shipped})
+        problems = check(self.consumer(**{"codex-review-check.yml": self.new_caller}), root)
+        self.assertProblem(problems, "`push`only` has an unusable name")
+
+    def test_a_dash_or_dot_prefixed_label_is_refused_the_same_way(self):
+        # Both are names the tooling downstream reads as something other than a
+        # name: a leading `-` is an option, and a leading `.` is skipped by the
+        # shell globs that used to enumerate these.
+        for label in ("-legacy", ".legacy"):
+            with self.subTest(label=label):
+                root = self.templates(self.current, {label: self.shipped})
+                problems = check(
+                    self.consumer(**{"codex-review-check.yml": self.new_caller}), root
+                )
+                self.assertProblem(problems, f"`{label}` has an unusable name")
+
+    def test_an_ordinary_label_is_not_refused(self):
+        # The other direction: the rule must accept the names actually used, or
+        # it fails every migration instead of the malformed ones.
+        for label in ("push-only", "push_only", "v1.2", "shape2"):
+            with self.subTest(label=label):
+                root = self.templates(self.current, {label: self.shipped})
+                problems = check(
+                    self.consumer(**{"codex-review-check.yml": self.old_caller}), root
+                )
+                self.assertEqual(problems, [])
+
     def test_notices_are_optional_so_every_existing_caller_keeps_working(self):
         # `check_consumer` is called without a notices list in this suite, in
         # scripts/check-consumers.sh's checker, and by consumers. A shape on

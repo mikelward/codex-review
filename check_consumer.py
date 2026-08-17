@@ -53,6 +53,7 @@ Usage: python3 check_consumer.py [<repo root>]
 Exits 0 when the consumer is correct, 1 with a report when it is not.
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -122,6 +123,20 @@ def template(name, root=HERE):
 #: ``templates/`` -- every reader names a file -- so nesting this inside it
 #: keeps "what shape may a consumer have" answerable from one directory.
 SUPERSEDED = "superseded"
+
+#: What a shape's label may be called.
+#:
+#: A label is not just a directory name: it is quoted into the ``notice:`` line
+#: a consumer reads, and the hub's own sweep reads it back out of that line to
+#: decide which migrations are still under way. A backtick in a label truncates
+#: that read, so the sweep sees a different label than the one it offered,
+#: finds no consumer on it, and calls a live migration finished -- telling a
+#: maintainer to delete a shape people are still using. A leading `-` is read
+#: by the tools downstream as an option rather than a name. None of that is
+#: worth carrying: labels are authored here, by hand, a few times ever, so the
+#: rule is a plain name and anything else is an authoring error reported by
+#: name.
+LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
 def superseded_shapes(root=HERE):
@@ -286,6 +301,13 @@ def check_consumer(root=".", templates_root=None, notices=None):
         # would fail a consumer for a defect in the mechanism. Fail loudly
         # naming the label instead.
         for label, files in shapes.items():
+            if not LABEL.match(label):
+                problems.append(
+                    f"the superseded shape `{label}` has an unusable name — a label is "
+                    "quoted into a notice and read back out of it by tooling, so it must "
+                    "start with a letter or digit and hold only letters, digits, `.`, `_` "
+                    "and `-`"
+                )
             absent = [name for name in TEMPLATES if name not in files]
             if absent:
                 problems.append(
