@@ -159,10 +159,23 @@ workflow's own. `loop-minutes` and `interval-seconds` are the two knobs, and
 
 ## How the verdict is read
 
-The reaction is the whole verdict. Codex comments when it has suggestions and
+The reaction is the usual verdict. Codex comments when it has suggestions and
 reacts 👍 when it does not, and it revokes the reaction when a new commit
 lands — so a reaction that is present belongs to the head being looked at, and
-nothing here has to compare SHAs to establish that.
+nothing has to compare SHAs to establish that.
+
+**A clean comment is the second approval channel**, because Codex does not
+always keep that promise: it sometimes posts `Didn't find any major issues`
+as a comment and leaves the body unreacted — and on one pull request it put
+the 👍 on the comment that nudged it, where nothing reads it. Such a comment
+approves only when it names the commit it read and that commit is this head,
+which is the same attributable standard a review is held to, and only when it
+is Codex's latest word: findings landing after it take precedence, since a
+comment is a fixed point in time where a reaction is re-added after a re-read.
+A clean comment naming some other commit decides nothing at all.
+
+So a `success` with no reaction on the body is expected, not a fault — read
+the comments before reporting the gate broken.
 
 Approval also requires no 👀 and no 👎 from the repository owner, and no owner
 `@codex review` newer than the 👍. That makes a hold two seconds of work from a
