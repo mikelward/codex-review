@@ -233,6 +233,38 @@ rule they are better than nothing — but once `success` publishes, auto-merge
 can fire within seconds, so a reaction placed after the verdict was never a
 reliable stop and is not one here.
 
+## What the gate does not defend against
+
+Three limits worth knowing before treating the status as adversarially
+robust review:
+
+- **The ground truth is Codex reading author-controlled content.** The
+  sweep is strict about *attribution* — only Codex's own reactions,
+  reviews, and clean comments count, ordered by server timestamps — but
+  everything Codex reads (title, body, diff, file contents) is written by
+  the pull request's author, instructions to the reviewer included. If
+  Codex is talked into reacting 👍 or posting a clean verdict, the result
+  is genuine — correctly attributed, correctly timestamped — and publishes
+  `success` exactly as designed. The gate guarantees fidelity to Codex's
+  answer, not that the answer resisted manipulation; human review and the
+  rest of the ruleset are the coverage for that.
+- **Holds and nudges assume a personal account.** A 👎/👀 hold and an
+  `@codex review` nudge count only from the repository *owner* — the first
+  segment of `owner/name`. On an organization-owned repository no human's
+  login equals that segment, so holds and nudges silently never register:
+  nothing goes red, and a standing `success` stays mergeable. The twelve
+  current consumers are personal repos; an org adoption needs this rethought
+  (repo admins instead of the owner segment) before the reactions mean
+  anything.
+- **A shared head fails closed, and an outsider can share yours.** The
+  status belongs to the commit, so two open pull requests carrying the same
+  head are ambiguous and publish `failure` — including when the other PR is
+  a fork's, which any account can open against a public head SHA. That is a
+  zero-privilege way to hold a PR at `failure`, accepted deliberately: the
+  fork PR would inherit the same commit's status, so approving through the
+  ambiguity is the fail-open direction. The remedy is closing the intruding
+  PR — the `closed` trigger resweeps within seconds.
+
 ## Why the workflow lives in your repo
 
 The action is the sweep. The workflow around it is a security boundary, and it
