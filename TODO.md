@@ -81,10 +81,10 @@ owner.
 
 ### Official actions ref-pinned, not hash-pinned, in the zizmor policy
 
-**Decided:** the zizmor policy (`.github/zizmor.yml` here and in
-gradle-update) accepts tag pins for `actions/*`, matching how every
-workflow already references them; only third-party actions must pin a
-hash. The owner approved adding zizmor pinned-and-advisory, but this
+**Decided:** the zizmor policy (`.github/zizmor.yml` here and in the
+sibling hub repository that carries the same setup) accepts tag pins for
+`actions/*`, matching how every workflow already references them; only
+third-party actions must pin a hash. The owner approved adding zizmor pinned-and-advisory, but this
 specific policy line was chosen without asking.
 
 **Alternative:** require hash pins for official actions too. That is real
