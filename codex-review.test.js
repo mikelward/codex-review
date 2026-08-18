@@ -1937,22 +1937,42 @@ describe("cleanVerdict", () => {
     expect(cleanVerdict(real, HEAD)).toBe("head");
   });
 
-  it("refuses a plain finding that follows the clean headline", () => {
-    // "Didn't find any major issues. However, I found a blocking bug." is a
-    // finding written in prose -- no badge for the second guard to catch --
-    // and a free tail approved it. The line has to BE a clean verdict, not
-    // merely open as one.
+  it("accepts a plain finding written as a continuation, knowingly", () => {
+    // "Didn't find any major issues. However, I found a blocking bug." is
+    // the exploit both the allowlist and the blacklist this repo tried were
+    // built to catch. Neither survived contact with the real tail variety
+    // Codex actually sends (see the comment above cleanVerdict), so this is
+    // now accepted on purpose: every real incident so far has been this
+    // function refusing a genuine clean verdict over unenumerated wording,
+    // never a hidden finding sneaking through. If that balance ever flips,
+    // this is the test to make fail again.
     const however = "Codex Review: Didn't find any major issues. However, I found a blocking bug.\n\n**Reviewed commit:** `5f3881b6c0`";
-    expect(cleanVerdict(however, HEAD)).toBe(null);
+    expect(cleanVerdict(however, HEAD)).toBe("head");
   });
 
-  it("fails closed on a cheer it does not know", () => {
-    // Deliberate: an unrecognized tail returns null, the gate waits for a
-    // reaction, and someone adds the cheer here. That is the degradation
-    // this function promises for wording it has not seen -- the alternative
-    // is a free tail, which is how the finding above got through.
+  it("accepts a cheer it has not seen before, or any tail at all", () => {
+    // The allowlist this replaced would have failed closed here, waiting on
+    // someone to add the exact wording. The tail is not inspected at all
+    // now -- the headline sentence alone is the verdict.
     const novel = "Codex Review: Didn't find any major issues. Nice one!\n\n**Reviewed commit:** `5f3881b6c0`";
-    expect(cleanVerdict(novel, HEAD)).toBe(null);
+    expect(cleanVerdict(novel, HEAD)).toBe("head");
+  });
+
+  it("accepts real cheers from the fleet that no allowlist ever named", () => {
+    // Sampled from the survey that motivated this: each was seen exactly
+    // once or twice across ~220 clean verdicts in 17 repos.
+    const cheers = [
+      "You're on a roll.",
+      "Chef's kiss.",
+      "Already looking forward to the next diff.",
+      "Another round soon, please!",
+      "What shall we delve into next?",
+      ":+1:",
+    ];
+    for (const cheer of cheers) {
+      const comment = `Codex Review: Didn't find any major issues. ${cheer}\n\n**Reviewed commit:** \`5f3881b6c0\``;
+      expect(cleanVerdict(comment, HEAD)).toBe("head");
+    }
   });
 
   it("accepts the bare sentence with no cheer at all", () => {
