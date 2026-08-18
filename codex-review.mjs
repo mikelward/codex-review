@@ -375,32 +375,35 @@ export function commentSignals(comments, { since, owner, head }) {
  * approving something unread.
  */
 /**
- * The tails observed after the clean headline. Empty is the bare sentence;
- * the rest are Codex's own flourishes, including the emoji shortcode it
- * sends unrendered.
+ * The tail after the clean headline is Codex's own flourish, and it varies
+ * without limit -- a fleet-wide survey of ~220 clean verdicts across 17
+ * repos turned up more than 20 distinct tails, most seen exactly once
+ * ("Nice work!" among them, the miss that prompted this), while the
+ * headline sentence itself was byte-for-byte identical every time. Neither
+ * an allowlist nor a blacklist of how the tail can start keeps pace with an
+ * open set -- the second one, tried and reverted in this same series, still
+ * rejected real fleet cheers it had never seen a shape for.
  *
- * This is an allowlist rather than a pattern because a free tail let a
- * finding through ("Didn't find any major issues. However, I found a
- * blocking bug."). The cost is that a cheer nobody has seen returns null and
- * the gate waits for a reaction until someone adds a line here -- which
- * happened within the hour: `:tada:` arrived on the pull request that
- * introduced the list. That is the intended failure direction, but if the
- * list needs a third addition it is evidence the tail should be bounded by
- * shape (short, no clause punctuation) instead of enumerated.
+ * So the tail is not checked at all: the headline sentence is the verdict,
+ * full stop. That accepts a real finding phrased as a continuation
+ * ("Didn't find any major issues. However, I found a blocking bug.") --
+ * openly, not by accident. Weighed against the actual failure this repo has
+ * hit repeatedly (a real clean verdict refused for wording nobody
+ * enumerated, stalling a merge gate fleet-wide), that trade reads the
+ * other way round: every real incident so far has been this function
+ * refusing a clean verdict, never approving a hidden finding.
  */
-const CLEAN_CHEERS = new Set(["", "Swish!", "Keep them coming!", ":tada:", "🎉"]);
-
 export function cleanVerdict(body, head) {
   const text = String(body ?? "");
   // Validate the WHOLE known structure, not a list of things it must not
-  // say. Four review rounds went the other way -- anchor the marker, end the
-  // sentence, allowlist the cheer -- and each one closed the hole it was
-  // shown while leaving the next position open: a continuation, then a
-  // second sentence, then a later line. Enumerating what a finding might
-  // look like cannot terminate, because prose has no edge. The clean
-  // comment's shape does: a headline, a reviewed-commit line, and Codex's
-  // collapsible `<details>` footer. Anything else in it means this is not
-  // that comment, whatever it says.
+  // say. Several review rounds went the other way -- anchor the marker, end
+  // the sentence, allowlist the cheer, then blacklist how the cheer could
+  // open -- and each one closed the hole it was shown while leaving the next
+  // position open, because enumerating what a finding might look like
+  // cannot terminate: prose has no edge. The clean comment's shape does: a
+  // headline, a reviewed-commit line, and Codex's collapsible `<details>`
+  // footer. Anything else in it means this is not that comment, whatever it
+  // says -- which is also why the tail itself is no longer inspected at all.
   //
   // Everything from `<details` on is Codex's boilerplate and is dropped
   // before the shape is checked; what remains must be exactly two content
@@ -413,11 +416,8 @@ export function cleanVerdict(body, head) {
 
   const headline = /^Codex Review:[ \t]*Didn['’]t find any major issues[.!](.*)$/.exec(lines[0]);
   if (!headline) return null;
-  // The cheer is an allowlist, so an unrecognized one returns null and the
-  // gate waits for a reaction -- the degradation this function promises for
-  // wording it does not know. A new cheer costs one stalled gate and a
-  // one-line addition; guessing costs a merge that should not have happened.
-  if (!CLEAN_CHEERS.has(headline[1].trim())) return null;
+  // The captured tail (headline[1]) is deliberately unchecked -- see the
+  // comment above.
 
   const named = /^\**Reviewed commit:\**[ \t]*`?([0-9a-f]{7,40})`?$/i.exec(lines[1])?.[1];
   if (!named) return null;
