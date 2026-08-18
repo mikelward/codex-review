@@ -9,10 +9,15 @@ rules:
   unpinned-uses:
     config:
       policies:
-        # `@main` IS the release: consumers track it deliberately, there
-        # is no release step, and a pin would be a thing to bump in nine
-        # repositories. See AGENTS.md.
-        "mikelward/*": ref-pin
+        # `@main` IS the release for these sibling actions: consumers
+        # track it deliberately, there is no release step, and a pin would
+        # be a thing to bump in every consumer (see AGENTS.md). Enumerated
+        # by name, not `mikelward/*` — owner-wide would also excuse a
+        # future workflow pulling any sibling at a mutable ref, and each
+        # exemption should be a decision somebody made. Adding one is one
+        # line here, plus the list in zizmor.test.js.
+        "mikelward/codex-review": ref-pin
+        "mikelward/lanes": ref-pin
         # Official actions may pin to a tag, as every workflow here does.
         # Hash-pinning them instead is a deliberate open question — see
         # the zizmor entry in TODO.md.
