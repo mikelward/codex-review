@@ -79,6 +79,23 @@ the merge-ungated option stays available. Do not nudge repeatedly — if the
 re-review raises it again, that is an answer, and the choice goes back to the
 owner.
 
+### Official actions ref-pinned, not hash-pinned, in the zizmor policy
+
+**Decided:** the zizmor policy (`.github/zizmor.yml` here and in
+gradle-update) accepts tag pins for `actions/*`, matching how every
+workflow already references them; only third-party actions must pin a
+hash. The owner approved adding zizmor pinned-and-advisory, but this
+specific policy line was chosen without asking.
+
+**Alternative:** require hash pins for official actions too. That is real
+supply-chain rigor — a compromised tag on a first-party action is not
+hypothetical for actions generally — at the cost of hash bumps becoming a
+recurring chore in repositories designed to have nothing to bump.
+
+**Reversible:** one policy line per repository, plus pinning the handful
+of `actions/*` references the change would then flag. Nothing else
+depends on the choice.
+
 ## Later
 
 - Implement the fork remedy above, before consumers start requiring

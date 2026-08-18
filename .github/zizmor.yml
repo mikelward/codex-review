@@ -1,0 +1,27 @@
+# Policy for zizmor; the advisory workflow beside this file runs it.
+#
+# The defaults demand hash pins everywhere and refuse pull_request_target
+# outright. Both collide with decisions this repository made deliberately,
+# so the exceptions live here, scoped as narrowly as the tool allows — a
+# NEW workflow reaching for pull_request_target is still flagged, because
+# only the named file is excused.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        # `@main` IS the release: consumers track it deliberately, there
+        # is no release step, and a pin would be a thing to bump in nine
+        # repositories. See AGENTS.md.
+        "mikelward/*": ref-pin
+        # Official actions may pin to a tag, as every workflow here does.
+        # Hash-pinning them instead is a deliberate open question — see
+        # the zizmor entry in TODO.md.
+        "actions/*": ref-pin
+        # Everything else must pin to a hash.
+        "*": hash-pin
+  dangerous-triggers:
+    # The sweep's triggers are load-bearing and reasoned through in the
+    # workflow's own header and docs/CONSUMER.md: it never checks out or
+    # executes pull request code.
+    ignore:
+      - codex-review.yml
