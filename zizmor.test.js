@@ -42,8 +42,12 @@ describe("zizmor workflow", () => {
 
   it("holds read-only permissions", () => {
     // The sole-writer rule in check_consumer.py guards statuses; this pins
-    // the whole grant, so the scan can never grow a scope quietly.
+    // the whole grant, so the scan can never grow a scope quietly. The
+    // top-level block must also be the ONLY one: GitHub lets a job-level
+    // mapping replace it wholesale, so a second block anywhere is a
+    // widening no matter how it is scoped.
     expect(workflow).toMatch(/\npermissions:\n  contents: read\njobs:/);
+    expect([...workflow.matchAll(/^ *permissions:/gm)]).toHaveLength(1);
   });
 
   it("re-runs when anything it scans changes", () => {
@@ -66,27 +70,25 @@ describe("zizmor workflow", () => {
 });
 
 describe("zizmor policy", () => {
-  it("exempts exactly the refs somebody decided to exempt", () => {
-    // `@main` is the release for the enumerated sibling actions. The list
-    // is compared whole and by name — owner-wide (`mikelward/*`) would
-    // also excuse a future workflow pulling any sibling at a mutable ref,
-    // which is a decision nobody made. Consuming a new sibling action
-    // means adding it here and in the policy, deliberately.
-    const refPinned = [...policyRules.matchAll(/^ +"([^"]+)": ref-pin$/gm)].map(
-      (m) => m[1],
-    );
-    expect(refPinned).toEqual([
-      "mikelward/codex-review",
-      "mikelward/lanes",
-      "actions/*",
+  it("holds the pin-policy table exact", () => {
+    // `@main` is the release for the enumerated sibling actions, official
+    // actions may pin tags, and the blanket hash-pin rule has to be
+    // restated because supplying policies replaces zizmor's defaults.
+    // Every entry is collected quoted or not — YAML accepts both, so a
+    // match that filtered by quoting style would let an unquoted key ride
+    // in unseen — and the table is compared whole: an entry added,
+    // dropped, or widened (say, mikelward/*) fails here, whichever shape
+    // it takes. Consuming a new sibling action at @main means adding it
+    // here and in the policy, deliberately.
+    const entries = [
+      ...policyRules.matchAll(/^ {8}"?([^":\n]+?)"?: *(\S+)$/gm),
+    ].map((m) => `${m[1]}: ${m[2]}`);
+    expect(entries).toEqual([
+      "mikelward/codex-review: ref-pin",
+      "mikelward/lanes: ref-pin",
+      "actions/*: ref-pin",
+      "*: hash-pin",
     ]);
-    expect(policyRules).not.toMatch(/mikelward\/\*/);
-  });
-
-  it("keeps hash pins the default", () => {
-    // Supplying policies replaces zizmor's defaults, so the blanket rule
-    // has to be restated or third-party actions go unchecked.
-    expect(policy).toMatch(/"\*": hash-pin/);
   });
 
   it("excuses the sweep's triggers for codex-review.yml alone", () => {
