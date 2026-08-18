@@ -67,10 +67,11 @@ has stopped biting.
 - The safe direction is the default: a broken sweep leaves `pending`, which
   blocks merges rather than letting anything through, so the worst case is
   every consumer's gate stalling until you revert.
-- Nine sibling repositories consume this: `conf`, `gedmap`, `lanes`, `mesh`,
-  `root`, `scripts`, `unixtools`, `vcs`, `web`. A change to the action's
-  inputs, its published wording, or `templates/` needs their workflows
-  checked, even though none of them has to be edited for an ordinary fix.
+- Twelve sibling repositories consume this: `conf`, `gedmap`, `lanes`, `mesh`,
+  `newshacker`, `npm-update`, `readmo`, `root`, `scripts`, `unixtools`, `vcs`,
+  `web`. A change to the action's inputs, its published wording, or
+  `templates/` needs their workflows checked, even though none of them has to
+  be edited for an ordinary fix.
 - **Changing a `templates/` file is a migration, and it has a mechanism —
   use it.** The pin is byte for byte against `@main`, so an edited template
   mismatches every consumer the instant it merges, while `check-consumers.sh`

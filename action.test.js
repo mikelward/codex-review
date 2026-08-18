@@ -290,14 +290,14 @@ describe("action.yml", () => {
     // running the check in their own CI. What this asserts is only that the
     // siblings AGENTS.md claims responsibility for are the ones actually swept.
     //
-    // Derived from AGENTS.md rather than pinned to a second copy of the nine
+    // Derived from AGENTS.md rather than pinned to a second copy of the twelve
     // names, so drift in EITHER file is caught and neither can be the one that
     // quietly becomes wrong.
     const agents = readFileSync("AGENTS.md", "utf8");
     const sweep = readFileSync("scripts/check-consumers.sh", "utf8");
 
     const named = agents
-      .match(/Nine sibling repositories consume this:([\s\S]*?)\. A change/)?.[1]
+      .match(/Twelve sibling repositories consume this:([\s\S]*?)\. A change/)?.[1]
       ?.match(/`([a-z-]+)`/g)
       ?.map((m) => m.slice(1, -1));
     const listed = sweep.match(/^CONSUMERS="([^"]+)"$/m)?.[1]?.split(" ");
@@ -305,8 +305,8 @@ describe("action.yml", () => {
     // Both regexes before either comparison: a set difference against an empty
     // set is empty, so a reindented AGENTS.md bullet or a requoted CONSUMERS
     // line would turn the assertion below green while checking nothing.
-    expect(named?.length).toBe(9);
-    expect(listed?.length).toBe(9);
+    expect(named?.length).toBe(12);
+    expect(listed?.length).toBe(12);
     expect([...named].sort()).toEqual([...listed].sort());
   });
 
