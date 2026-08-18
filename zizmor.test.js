@@ -54,8 +54,13 @@ describe("zizmor workflow", () => {
     const filters = [...workflow.matchAll(/paths: \[(.+)\]/g)].map((m) => m[1]);
     expect(filters).toHaveLength(2);
     for (const f of filters) {
-      expect(f).toContain("'.github/**'");
-      expect(f).toContain("'action.yml'");
+      // Compared whole, not by membership: an appended pattern — above all
+      // a negation like !.github/workflows/** — must fail here, not ride
+      // along beside the two expected entries.
+      expect(f.split(",").map((p) => p.trim())).toEqual([
+        "'.github/**'",
+        "'action.yml'",
+      ]);
     }
   });
 });
