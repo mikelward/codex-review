@@ -67,11 +67,21 @@ has stopped biting.
 - The safe direction is the default: a broken sweep leaves `pending`, which
   blocks merges rather than letting anything through, so the worst case is
   every consumer's gate stalling until you revert.
-- Twelve sibling repositories consume this: `conf`, `gedmap`, `lanes`, `mesh`,
-  `newshacker`, `npm-update`, `readmo`, `root`, `scripts`, `unixtools`, `vcs`,
-  `web`. A change to the action's inputs, its published wording, or
-  `templates/` needs their workflows checked, even though none of them has to
-  be edited for an ordinary fix.
+- Seventeen sibling repositories consume this: `clothescast`, `conf`,
+  `gedmap`, `gradle-update`, `lanes`, `mesh`, `newshacker`, `npm-update`,
+  `readmo`, `root`, `rust-update`, `scripts`, `snoozemo`, `typelauncher`,
+  `unixtools`, `vcs`, `web`. A change to the action's inputs, its published
+  wording, or `templates/` needs their workflows checked, even though none of
+  them has to be edited for an ordinary fix.
+- **`simmo` is a sibling, not a consumer, and that is deliberate.** It runs
+  the sweep and listener but keeps a no-schedule `codex-review.yml` that
+  diverges from `templates/` on purpose: it's a private repo, so the
+  canonical hourly cron bills real Actions minutes, and it has chosen not to
+  pay that yet. `check_consumer.py`'s byte-for-byte pin can't accommodate the
+  divergence, so it isn't in `CONSUMERS` and never adopted
+  `codex-review-check.yml`. The trade-off (accept the cost and enroll, or
+  keep the customization permanently) is recorded in `simmo`'s own `TODO.md`
+  under "Decisions needing review" — not this repository's problem to solve.
 - **Changing a `templates/` file is a migration, and it has a mechanism —
   use it.** The pin is byte for byte against `@main`, so an edited template
   mismatches every consumer the instant it merges, while `check-consumers.sh`
