@@ -290,24 +290,49 @@ describe("action.yml", () => {
     // running the check in their own CI. What this asserts is only that the
     // siblings AGENTS.md claims responsibility for are the ones actually swept.
     //
-    // Derived from AGENTS.md rather than pinned to a second copy of the twelve
+    // Derived from AGENTS.md rather than pinned to a second copy of the
     // names, so drift in EITHER file is caught and neither can be the one that
     // quietly becomes wrong.
     const agents = readFileSync("AGENTS.md", "utf8");
     const sweep = readFileSync("scripts/check-consumers.sh", "utf8");
 
-    const named = agents
-      .match(/Twelve sibling repositories consume this:([\s\S]*?)\. A change/)?.[1]
+    const heading = agents.match(
+      /(\w+) sibling repositories consume this:([\s\S]*?)\. A change/,
+    );
+    const countWord = heading?.[1];
+    const named = heading?.[2]
       ?.match(/`([a-z-]+)`/g)
       ?.map((m) => m.slice(1, -1));
     const listed = sweep.match(/^CONSUMERS="([^"]+)"$/m)?.[1]?.split(" ");
 
+    // Spelled-out numbers this prose has actually used or is likely to next;
+    // extend it rather than widening the regex above -- an unrecognized word
+    // must fail loudly, not read as "any word will do."
+    const NUMBER_WORDS = {
+      ten: 10,
+      eleven: 11,
+      twelve: 12,
+      thirteen: 13,
+      fourteen: 14,
+      fifteen: 15,
+      sixteen: 16,
+      seventeen: 17,
+      eighteen: 18,
+      nineteen: 19,
+      twenty: 20,
+    };
+
     // Both regexes before either comparison: a set difference against an empty
     // set is empty, so a reindented AGENTS.md bullet or a requoted CONSUMERS
     // line would turn the assertion below green while checking nothing.
-    expect(named?.length).toBe(12);
-    expect(listed?.length).toBe(12);
+    expect(named?.length).toBe(17);
+    expect(listed?.length).toBe(17);
     expect([...named].sort()).toEqual([...listed].sort());
+    // The count WORD is asserted against the parsed names too, not just
+    // pinned to 17 -- otherwise a future enrollment that updates the names
+    // and CONSUMERS but leaves the prose reading "Seventeen" would pass here
+    // while AGENTS.md quietly published a stale count.
+    expect(NUMBER_WORDS[countWord?.toLowerCase()]).toBe(named?.length);
   });
 
   it("makes the consumer check dispatchable, and is not mid-migration", () => {
