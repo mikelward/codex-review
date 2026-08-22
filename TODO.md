@@ -1,5 +1,16 @@
 # TODO
 
+## Review and merge gates
+
+- [ ] **Add `zizmor` to the ruleset's required set** once it has reported
+      on a pull request: the zizmor workflow now runs unfiltered on every
+      PR precisely so it can be required (a paths-filtered workflow
+      creates no check run at all on a non-matching PR, which a ruleset
+      waits on forever) — the posture piloted in mikelward/lanes and
+      mikelward/ci-commit-artifact. `repo-rules mikelward/codex-review`
+      with no arguments applies the standard `lanes codex zizmor` set
+      (once the `gate` → `lanes` rename below has also landed).
+
 ## Finish the gate → lanes check rename
 
 The consumer-facing required check was renamed from `gate` to `lanes`
