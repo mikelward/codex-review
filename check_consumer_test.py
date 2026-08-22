@@ -213,6 +213,181 @@ class TheSoleWriterScan(ConsumerCase):
         self.assertEqual(self.check(ci_yml=CI.replace("  contents: read", "  statuses: read")), [])
 
 
+#: A trusted-verdicts consumer (mikelward/lanes TODO.md): init and finalize
+#: hold `statuses: write` and consist of nothing but the lanes engine plus,
+#: on the finalizer, the checkout it reads the policy from.
+LANES_CI = """name: CI
+on:
+  pull_request_target:
+permissions: {}
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    environment: lanes
+    permissions:
+      statuses: write
+    steps:
+      - uses: mikelward/lanes@main
+        with:
+          mode: init
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: 'true'
+  finalize:
+    runs-on: ubuntu-latest
+    environment: lanes
+    permissions:
+      statuses: write
+      pull-requests: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/pull/1/merge
+          persist-credentials: false
+      - uses: mikelward/lanes@main
+        with:
+          mode: gate
+"""
+
+
+class TheLanesPublisherExcuse(ConsumerCase):
+    """The one shape allowed to hold ``statuses: write`` besides the sweep.
+
+    Every case below that tightens the shape exists because the excuse is
+    judged from the job's own steps: the moment anything that is not the
+    engine (or a checkout it reads from) can execute inside the granted job,
+    the grant is reachable by code that could write ``codex``, and the
+    excuse must collapse back to a finding.
+    """
+
+    def test_allows_the_init_and_finalize_pair(self):
+        self.assertEqual(self.check(ci_yml=LANES_CI), [])
+
+    def test_a_run_step_beside_the_engine_collapses_the_excuse(self):
+        bad = LANES_CI.replace(
+            "      - uses: mikelward/lanes@main\n        with:\n          mode: init",
+            "      - uses: mikelward/lanes@main\n        with:\n          mode: init\n      - run: 'true'",
+        )
+        self.assertProblem(self.check(ci_yml=bad), "can write commit statuses (job `init`)")
+
+    def test_an_action_other_than_the_engine_collapses_it(self):
+        bad = LANES_CI.replace("mode: init", "mode: init\n      - uses: actions/github-script@v7")
+        self.assertProblem(self.check(ci_yml=bad), "can write commit statuses (job `init`)")
+
+    def test_the_engine_at_any_ref_but_main_collapses_it(self):
+        # A branch or SHA of the same repository is not the released engine;
+        # only `@main` is what the fleet reviews and tracks.
+        bad = LANES_CI.replace("mikelward/lanes@main", "mikelward/lanes@feature")
+        self.assertProblem(self.check(ci_yml=bad), "can write commit statuses")
+
+    def test_a_container_collapses_it(self):
+        # The steps would execute inside an image this shape check cannot
+        # vouch for.
+        bad = LANES_CI.replace(
+            "  init:\n    runs-on: ubuntu-latest",
+            "  init:\n    runs-on: ubuntu-latest\n    container: example/image:1",
+        )
+        self.assertProblem(self.check(ci_yml=bad), "can write commit statuses (job `init`)")
+
+    def test_a_checkout_only_job_is_not_a_publisher(self):
+        # Nothing in it publishes, so nothing in it needs the grant — an
+        # excused-but-idle grant would be a free capability waiting for a
+        # later edit to use.
+        bad = LANES_CI.replace(
+            "      - uses: actions/checkout@v5\n        with:\n          ref: refs/pull/1/merge\n          persist-credentials: false\n      - uses: mikelward/lanes@main\n        with:\n          mode: gate",
+            "      - uses: actions/checkout@v5\n        with:\n          ref: refs/pull/1/merge\n          persist-credentials: false",
+        )
+        self.assertProblem(self.check(ci_yml=bad), "can write commit statuses (job `finalize`)")
+
+    def test_a_step_level_env_collapses_it(self):
+        # `NODE_OPTIONS: --require ./payload.js` makes the action's own Node
+        # process load repository-controlled code inside the granted job.
+        bad = LANES_CI.replace(
+            "        with:\n          mode: gate",
+            "        with:\n          mode: gate\n        env:\n          NODE_OPTIONS: --require ./payload.js",
+        )
+        self.assertProblem(self.check(ci_yml=bad), "can write commit statuses (job `finalize`)")
+
+    def test_a_job_level_env_collapses_it(self):
+        bad = LANES_CI.replace(
+            "  init:\n    runs-on: ubuntu-latest",
+            "  init:\n    runs-on: ubuntu-latest\n    env:\n      NODE_OPTIONS: --require ./payload.js",
+        )
+        self.assertProblem(self.check(ci_yml=bad), "can write commit statuses (job `init`)")
+
+    def test_a_workflow_level_env_collapses_it_for_every_job(self):
+        # A top-level env: reaches every job's processes the same way a
+        # job-level one does.
+        bad = LANES_CI.replace(
+            "permissions: {}",
+            "permissions: {}\nenv:\n  NODE_OPTIONS: --require ./payload.js",
+        )
+        self.assertProblem(self.check(ci_yml=bad), "can write commit statuses (job `init`)")
+
+    def test_an_unrecognized_job_key_collapses_it(self):
+        # The whitelist is the guard, not a forbidden-key list: whatever a
+        # new execution-affecting key means, it is refused unrecognized.
+        bad = LANES_CI.replace(
+            "  init:\n    runs-on: ubuntu-latest",
+            "  init:\n    runs-on: ubuntu-latest\n    defaults:\n      run:\n        shell: bash",
+        )
+        self.assertProblem(self.check(ci_yml=bad), "can write commit statuses (job `init`)")
+
+    def test_an_unrecognized_step_key_collapses_it(self):
+        bad = LANES_CI.replace(
+            "        with:\n          mode: init",
+            "        with:\n          mode: init\n        continue-on-error: true",
+        )
+        self.assertProblem(self.check(ci_yml=bad), "can write commit statuses (job `init`)")
+
+    def test_a_checkout_pointed_at_another_server_collapses_it(self):
+        # checkout authenticates its fetch with its default `github.token`
+        # input, so `github-server-url` hands the job's ambient token --
+        # this grant included -- to whatever host it names.
+        bad = LANES_CI.replace(
+            "          ref: refs/pull/1/merge",
+            "          ref: refs/pull/1/merge\n          github-server-url: https://example.com",
+        )
+        self.assertProblem(self.check(ci_yml=bad), "can write commit statuses (job `finalize`)")
+
+    def test_a_checkout_with_any_unrecognized_input_collapses_it(self):
+        bad = LANES_CI.replace(
+            "          ref: refs/pull/1/merge",
+            "          ref: refs/pull/1/merge\n          token: not-the-default",
+        )
+        self.assertProblem(self.check(ci_yml=bad), "can write commit statuses (job `finalize`)")
+
+    def test_a_self_hosted_runner_collapses_it(self):
+        # A self-hosted runner is a machine whatever else already runs
+        # there can read the job's token from -- every allowlisted step and
+        # input still leaves that reachable.
+        bad = LANES_CI.replace(
+            "  init:\n    runs-on: ubuntu-latest",
+            "  init:\n    runs-on: self-hosted",
+        )
+        self.assertProblem(self.check(ci_yml=bad), "can write commit statuses (job `init`)")
+
+    def test_a_custom_runner_label_collapses_it_even_when_ubuntu_named(self):
+        # A self-hosted runner GROUP can label itself anything, including
+        # something that looks like GitHub's own image -- enumerated exactly
+        # rather than by prefix so that naming trick does not pass.
+        bad = LANES_CI.replace(
+            "  init:\n    runs-on: ubuntu-latest",
+            "  init:\n    runs-on: ubuntu-latest-custom",
+        )
+        self.assertProblem(self.check(ci_yml=bad), "can write commit statuses (job `init`)")
+
+    def test_a_top_level_grant_is_never_excused(self):
+        # It governs every job in the file at once, the non-publishers
+        # included.
+        bad = LANES_CI.replace("permissions: {}", "permissions:\n  statuses: write")
+        self.assertProblem(self.check(ci_yml=bad), "can write commit statuses (top level)")
+
+
 class TheDeclaredBlockRequirement(ConsumerCase):
     def test_catches_a_workflow_that_declares_nothing(self):
         # Declaring none inherits the repository's default GITHUB_TOKEN

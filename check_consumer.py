@@ -38,7 +38,12 @@ The sole-writer rule matters because a commit status belongs to the SHA: a
 second writer is an unordered write, and one delayed past the sweep's exit
 overwrites a fresh verdict with a stale one, with nothing to report that it
 happened. A ``codex-verdict-reset`` workflow did exactly that and was deleted for
-it. Every other workflow must also DECLARE a top-level permissions block, since
+it. The rule guards the ``codex`` CONTEXT, not the scope for its own sake, so
+it has exactly one shape-checked excuse: a job that consists of nothing but
+the lanes engine (``mikelward/lanes@main``, plus a checkout it reads from)
+can only ever write the ``lanes`` context and is allowed its job-level
+``statuses: write`` -- see ``lanes_publisher_only`` for the fail-closed
+judgment. Every other workflow must also DECLARE a top-level permissions block, since
 declaring none is not the same as granting nothing -- it inherits the
 repository's default GITHUB_TOKEN permission, a repository setting no file in
 the tree can read. That found real holes in two consumers on the day it was
@@ -249,22 +254,163 @@ def first_difference(actual, expected):
 
 
 def permission_values(doc):
-    """Every permissions value in a parsed workflow, as ``(where, value)``.
+    """Every permissions value in a parsed workflow, as ``(where, value, job)``.
 
     Per-job values are deliberately included -- without them a job-level grant
-    could hide under a top-level block that disclaims it.
+    could hide under a top-level block that disclaims it. ``job`` is the job's
+    own parsed mapping for a job-level value, so a caller can judge the grant
+    against what the job actually runs (see ``lanes_publisher_only``), and
+    ``None`` for the top-level block, which governs every job at once and is
+    never excusable that way.
     """
     found = []
     if not isinstance(doc, dict):
         return found
     if "permissions" in doc:
-        found.append(("top level", doc["permissions"]))
+        found.append(("top level", doc["permissions"], None))
     jobs = doc.get("jobs")
     if isinstance(jobs, dict):
         for name, job in jobs.items():
             if isinstance(job, dict) and "permissions" in job:
-                found.append((f"job `{name}`", job["permissions"]))
+                found.append((f"job `{name}`", job["permissions"], job))
     return found
+
+
+#: The docs-lane engine, the one other identity trusted to write a status --
+#: tracked ``@main`` exactly as consumers track this repository, so excusing
+#: it adds nobody new to the trust list. Only this ref: a branch or SHA of the
+#: same action is not the released engine.
+LANES_ACTION = "mikelward/lanes@main"
+
+
+#: The only keys an excused job may carry. A whitelist rather than a list of
+#: forbidden ones, because the forbidden list is GitHub's to grow: `env`
+#: injects into the action's own process (`NODE_OPTIONS: --require` loads
+#: repository code inside the job that holds the grant), `container`/
+#: `services` supply an execution environment, `defaults` rewrites how steps
+#: run -- and the next such key ships without notice here. Every key outside
+#: this set collapses the excuse, whatever it means.
+PUBLISHER_JOB_KEYS = frozenset(
+    ("name", "runs-on", "timeout-minutes", "needs", "if", "environment", "permissions", "steps")
+)
+
+#: The GitHub-hosted runner labels an excused job may name. A self-hosted
+#: runner (a bare custom label, or the literal `self-hosted`) is a machine
+#: whatever else already runs there can read the job's environment from --
+#: including a `statuses: write` token every allowlisted step and input
+#: still leaves reachable. Enumerated exactly, not by prefix: a self-hosted
+#: runner group is free to label itself `ubuntu-anything`, and a prefix
+#: match would accept it as if it were GitHub's own image. Kept to the
+#: standard three OSes' `-latest` and dated aliases in current use; add to
+#: this set deliberately; a version this file has never heard of is
+#: refused, not guessed at.
+PUBLISHER_RUNNERS = frozenset(
+    (
+        "ubuntu-latest",
+        "ubuntu-24.04",
+        "ubuntu-22.04",
+        "windows-latest",
+        "windows-2025",
+        "windows-2022",
+        "macos-latest",
+        "macos-15",
+        "macos-14",
+        "macos-13",
+    )
+)
+
+# A residual gap this whitelist does NOT close, flagged by review and left
+# open rather than papered over: a self-hosted runner can register under
+# ANY label, including the exact string "ubuntu-latest" -- GitHub does not
+# reserve these strings for its own hosted fleet, it only auto-attaches
+# them to the runners it provisions. Whether a given label in a workflow
+# FILE resolves to GitHub's own machine or to a same-named self-hosted one
+# is an account-configuration fact this check cannot see: it parses text,
+# it makes no API call to list registered runners (the no-dependencies,
+# file-only design every consumer trusts this check FOR), and nothing in
+# the YAML distinguishes the two cases. Adopting the lanes publisher
+# pattern therefore carries an unstated prerequisite this check cannot
+# verify or enforce: the repository (and any organization providing its
+# runners) must hold no self-hosted runner labeled with a string in this
+# set. That is an administrative fact about the account, not a property
+# of the workflow file, and closing it for real would mean this check
+# calling the runners API with a token scoped to read them -- a different
+# trust model than "read the files, answer from what they say" this
+# checker has held since it replaced nine hand-written copies. Left open
+# rather than half-closed with a check that cannot actually verify what it
+# would be asserting.
+
+
+#: Same reasoning, per step: `env` is the known injection channel, and
+#: anything else unrecognized is refused rather than interpreted.
+PUBLISHER_STEP_KEYS = frozenset(("name", "id", "uses", "with", "if"))
+
+#: The only inputs an excused checkout step may pass. `github-server-url`
+#: is the known exfiltration channel -- checkout authenticates its fetch
+#: with its default `github.token` input, so pointing it at another host
+#: hands that server the job's ambient token, `statuses: write` included,
+#: before `persist-credentials: false` ever applies -- and `token`,
+#: `ssh-key`, and the rest are refused unrecognized on the same whitelist
+#: principle as everywhere else. The publisher pattern needs exactly a ref
+#: (the synthetic merge) and credential non-persistence.
+PUBLISHER_CHECKOUT_INPUTS = frozenset(("ref", "persist-credentials"))
+
+
+def lanes_publisher_only(job, workflow=None):
+    """True when a job's grant could only ever write the ``lanes`` context.
+
+    The fleet's trusted-verdicts design (mikelward/lanes TODO.md, "Trusted
+    verdicts need an explicit publisher") posts the required ``lanes`` verdict
+    as an App-authenticated commit status, and the two jobs that do it -- a
+    consumer's ``init`` and ``finalize`` -- must hold ``statuses: write``.
+    That coexists with the sole-writer rule only because of what those jobs
+    are made of: the lanes engine hard-codes its status context to ``lanes``,
+    so a job that executes nothing else has no way to touch ``codex``.
+
+    Judged fail-closed from the job's own shape, by whitelist. The job and
+    each of its steps may carry only the keys in ``PUBLISHER_JOB_KEYS`` /
+    ``PUBLISHER_STEP_KEYS`` -- which is what keeps ``run:`` steps,
+    ``container:``/``services:`` images, and above all ``env:`` out: an
+    environment value like ``NODE_OPTIONS: --require ./payload.js`` makes
+    the action's own Node process load repository-controlled code inside
+    the job that holds the grant. A workflow-level ``env:`` reaches every
+    job the same way, so its presence anywhere in the file (pass the parsed
+    workflow as ``workflow``) disqualifies too. Each step's ``uses:`` must
+    be either the engine itself at exactly ``@main`` or ``actions/checkout``
+    (the finalizer reads ``.github/lanes.conf`` from a checkout; the
+    checkout action fetches files and executes none of them), and at least
+    one step must be the engine, or the grant excuses a job that publishes
+    nothing -- and a checkout step's inputs are whitelisted too
+    (``PUBLISHER_CHECKOUT_INPUTS``): ``github-server-url`` would hand the
+    job's ambient token, this grant included, to whatever host it names.
+    ``runs-on`` must also name one of ``PUBLISHER_RUNNERS`` exactly: a
+    self-hosted runner is a machine whatever else runs there can read the
+    grant's token from, whatever the job's own steps declare. Anything
+    unrecognized is False, which reports the job rather than excusing it.
+    """
+    if workflow is not None and (not isinstance(workflow, dict) or "env" in workflow):
+        return False
+    if not isinstance(job, dict) or not set(job) <= PUBLISHER_JOB_KEYS:
+        return False
+    if job.get("runs-on") not in PUBLISHER_RUNNERS:
+        return False
+    steps = job.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return False
+    ran_engine = False
+    for step in steps:
+        if not isinstance(step, dict) or not set(step) <= PUBLISHER_STEP_KEYS:
+            return False
+        uses = step.get("uses")
+        if uses == LANES_ACTION:
+            ran_engine = True
+        elif isinstance(uses, str) and uses.startswith("actions/checkout@"):
+            inputs = step.get("with", {})
+            if not isinstance(inputs, dict) or not set(inputs) <= PUBLISHER_CHECKOUT_INPUTS:
+                return False
+        else:
+            return False
+    return ran_engine
 
 
 def judge(value):
@@ -408,7 +554,7 @@ def check_consumer(root=".", templates_root=None, notices=None):
             continue
 
         values = permission_values(doc)
-        if not any(where == "top level" for where, _ in values):
+        if not any(where == "top level" for where, _, _ in values):
             problems.append(
                 f"{name} declares no top-level permissions block, so its jobs "
                 "inherit the repository's default GITHUB_TOKEN permission — a "
@@ -416,13 +562,21 @@ def check_consumer(root=".", templates_root=None, notices=None):
                 "read/write"
             )
 
-        for where, value in values:
+        for where, value, job in values:
             verdict = judge(value)
             if verdict == "write":
+                # The one excuse: a job that is nothing but the lanes engine
+                # (plus a checkout it reads from) can only ever write the
+                # `lanes` context, never `codex` -- see lanes_publisher_only.
+                if job is not None and lanes_publisher_only(job, doc):
+                    continue
                 problems.append(
                     f"{name} can write commit statuses ({where}), and only {SWEEP} "
                     "may — a second writer is an unordered write, and one delayed "
-                    "past the sweep's exit overwrites a fresh verdict with a stale one"
+                    "past the sweep's exit overwrites a fresh verdict with a stale "
+                    "one. The sole excuse is a job whose every step is "
+                    f"`{LANES_ACTION}` or an actions/checkout it reads from, "
+                    "which this is not"
                 )
             elif verdict != "safe":
                 problems.append(f"{name} ({where}): {verdict}")
