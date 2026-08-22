@@ -15,6 +15,23 @@ do:
       job and its parity test (`workflow-check-rename.test.js`) in a
       follow-up PR.
 
+## Open gap: the lanes-publisher runner check trusts labels it cannot verify
+
+`lanes_publisher_only`'s `PUBLISHER_RUNNERS` whitelist (mikelward/codex-review#27)
+accepts a job only when `runs-on:` names an exact GitHub-hosted label --
+but a self-hosted runner can register under that same string, and this
+checker parses workflow text only, with no API call to list what runners
+an account actually has. So a repository adopting the trusted-lanes
+publisher pattern carries a prerequisite this check cannot verify: no
+self-hosted runner, anywhere the repository or its organization draws
+runners from, may be labeled with a string in `PUBLISHER_RUNNERS`. Flagged
+by Codex review; documented in `check_consumer.py` and `docs/CONSUMER.md`
+rather than half-closed, since actually closing it would mean this checker
+calling the runners API with a token scoped to read them -- a different
+trust model than the file-only one every consumer relies on today. Revisit
+if a consumer's own self-hosted fleet ever makes this more than a
+theoretical collision.
+
 ## Decisions needing review
 
 Guesses made under autopilot, recorded here so nothing decided without the

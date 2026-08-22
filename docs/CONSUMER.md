@@ -463,6 +463,41 @@ notice is worth acting on rather than living with.
 and the rest differ per repository, so they cannot be pinned, and this is the
 one place a workflow has to be *understood*. It is parsed with PyYAML.
 
+The rule guards the `codex` **context**, not the scope for its own sake, so it
+carries exactly one shape-checked excuse: a job-level `statuses: write` is
+allowed when the job consists of nothing but `mikelward/lanes@main` (plus an
+`actions/checkout` it reads `.github/lanes.conf` from) — the fleet's
+trusted-verdicts publisher (`init`/`finalize` in a consumer riding that
+design), whose engine hard-codes its status context to `lanes` and so cannot
+touch `codex`. The judgment is fail-closed, by whitelist: the job and its
+steps may carry only a small recognized key set, so a `run:` step, any other
+action, the engine at any ref but `@main`, a `container:`/`services:` image,
+a job that never actually runs the engine, and above all an `env:` block at
+any level — step, job, or workflow-wide, since `NODE_OPTIONS: --require`
+there makes the action's own process load repository-controlled code — all
+collapse the excuse back to a finding, as does any key the whitelist has
+never heard of, and so does a `runs-on` naming anything but an exact
+GitHub-hosted runner label — a self-hosted runner is a machine whatever
+else already runs there can read the grant's token from, whatever the
+job's own steps declare. The moment anything else can execute inside the
+granted job, or the granted job runs somewhere else already has code on
+it, the grant is reachable by code this check cannot vouch for. A
+top-level `statuses: write` is never excused; it governs every job in the
+file at once.
+
+**This leaves one gap open, not closed, flagged by review**: a self-hosted
+runner can register under any label, including the exact GitHub-hosted
+strings this check trusts, and whether a given `runs-on:` in the file
+resolves to GitHub's own machine or to a same-named self-hosted one is an
+account-configuration fact — nothing in the workflow text distinguishes
+them, and this check parses text only, calling no API to list what runners
+your account actually has. **Adopting the lanes publisher pattern carries
+an unstated prerequisite this check cannot verify: your repository, and
+any organization supplying its runners, must hold no self-hosted runner
+labeled `ubuntu-latest` or any of the other strings in `PUBLISHER_RUNNERS`.**
+That is yours to hold, not something a green check here can attest to.
+
+
 That parser is the whole reason this check is Python. Eight rounds of review
 established that a pattern over YAML is not a reading of YAML — `write-all`, a
 `.yaml` filename, `statuses: "write"`, `"pull_request":`, `"permissions":`, a
