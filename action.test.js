@@ -505,6 +505,28 @@ describe("action.yml", () => {
   });
 });
 
+describe("the migration-ordering rule", () => {
+  it("keeps simmo last, stated in AGENTS.md beside the cost that motivates it", () => {
+    // simmo is the one sibling whose CI is billed, so it is where a change is
+    // confirmed and never where it is tried. The cost was already recorded
+    // here; the ordering that follows from it was not, and left implicit a
+    // batch reaches simmo in whatever order the repos happen to be visited —
+    // debugging a half-settled change on the only repository that charges for
+    // the attempt.
+    const agents = readFileSync("AGENTS.md", "utf8");
+    const bullet = agents.match(/- \*\*`simmo` is a sibling[\s\S]*?\n(?=- \*\*|## )/)?.[0];
+    // Assert the parse found the bullet before trusting anything about it:
+    // a match against nothing satisfies every check below.
+    expect(typeof bullet).toBe("string");
+    // The cost, which is what makes the ordering more than a preference.
+    expect(bullet).toMatch(/private repo/);
+    expect(bullet).toMatch(/Actions minutes/);
+    // The ordering itself, and the reason it is not merely "go slowly".
+    expect(bullet).toMatch(/\*\*last\*\* repository in any\s+fleet-wide migration/);
+    expect(bullet).toMatch(/confirmed, never where it is tried/);
+  });
+});
+
 describe("the autopilot decision record", () => {
   it("is a contract in AGENTS.md, not just a file that happens to exist", () => {
     // TODO.md's heading is where an unasked question goes to be seen. If the
