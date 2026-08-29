@@ -77,7 +77,9 @@ has stopped biting.
   the sweep and listener but keeps a no-schedule `codex-review.yml` that
   diverges from `templates/` on purpose: it's a private repo, so the
   canonical hourly cron bills real Actions minutes, and it has chosen not to
-  pay that yet. `check_consumer.py`'s byte-for-byte pin can't accommodate the
+  pay that yet. That same billing makes it the **last** repository in any
+  fleet-wide migration: every other sibling's CI is free, so simmo is where a
+  change is confirmed, never where it is tried. `check_consumer.py`'s byte-for-byte pin can't accommodate the
   divergence, so it isn't in `CONSUMERS` and never adopted
   `codex-review-check.yml`. The trade-off (accept the cost and enroll, or
   keep the customization permanently) is recorded in `simmo`'s own `TODO.md`
