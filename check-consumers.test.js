@@ -126,7 +126,7 @@ describe("the finished-migration guard", () => {
   it("visits the consumer names the script actually iterates", () => {
     // Every case below depends on this: a name the script does not iterate is
     // a tree it never reads, and the assertion passes vacuously.
-    expect(CONSUMERS?.length).toBe(17);
+    expect(CONSUMERS?.length).toBe(18);
     const { status, out } = sweep({ consumers: ["current", "current"] });
     expect(out).toMatch(/read 2 consumer\(s\), checked 2/);
     expect(status).toBe(0);

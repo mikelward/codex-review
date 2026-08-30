@@ -67,12 +67,12 @@ has stopped biting.
 - The safe direction is the default: a broken sweep leaves `pending`, which
   blocks merges rather than letting anything through, so the worst case is
   every consumer's gate stalling until you revert.
-- Seventeen sibling repositories consume this: `clothescast`, `conf`,
-  `gedmap`, `gradle-update`, `lanes`, `mesh`, `newshacker`, `npm-update`,
-  `readmo`, `root`, `rust-update`, `scripts`, `snoozemo`, `typelauncher`,
-  `unixtools`, `vcs`, `web`. A change to the action's inputs, its published
-  wording, or `templates/` needs their workflows checked, even though none of
-  them has to be edited for an ordinary fix.
+- Eighteen sibling repositories consume this: `androidlog`, `clothescast`,
+  `conf`, `gedmap`, `gradle-update`, `lanes`, `mesh`, `newshacker`,
+  `npm-update`, `readmo`, `root`, `rust-update`, `scripts`, `snoozemo`,
+  `typelauncher`, `unixtools`, `vcs`, `web`. A change to the action's inputs,
+  its published wording, or `templates/` needs their workflows checked, even
+  though none of them has to be edited for an ordinary fix.
 - **`simmo` is a sibling, not a consumer, and that is deliberate.** It runs
   the sweep and listener but keeps a no-schedule `codex-review.yml` that
   diverges from `templates/` on purpose: it's a private repo, so the
