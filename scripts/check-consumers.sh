@@ -51,7 +51,7 @@ set -eu
 # the clone below supplies the owner, so this list cannot express an outside
 # adopter -- deliberately, since it is the siblings this repository is
 # responsible for checking, not a registry of everyone using the action.
-CONSUMERS="scripts vcs conf unixtools root mesh web gedmap lanes readmo newshacker npm-update rust-update gradle-update snoozemo clothescast typelauncher androidlog"
+CONSUMERS="scripts vcs conf unixtools root mesh web gedmap lanes readmo newshacker npm-update rust-update gradle-update snoozemo clothescast typelauncher ci-commit-artifact yaml-lite androidlog"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 SIBLINGS="${1:-}"
 

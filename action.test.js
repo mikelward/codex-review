@@ -325,12 +325,12 @@ describe("action.yml", () => {
     // Both regexes before either comparison: a set difference against an empty
     // set is empty, so a reindented AGENTS.md bullet or a requoted CONSUMERS
     // line would turn the assertion below green while checking nothing.
-    expect(named?.length).toBe(18);
-    expect(listed?.length).toBe(18);
+    expect(named?.length).toBe(20);
+    expect(listed?.length).toBe(20);
     expect([...named].sort()).toEqual([...listed].sort());
     // The count WORD is asserted against the parsed names too, not just
-    // pinned to 18 -- otherwise a future enrollment that updates the names
-    // and CONSUMERS but leaves the prose reading "Eighteen" would pass here
+    // pinned to 20 -- otherwise a future enrollment that updates the names
+    // and CONSUMERS but leaves the prose reading "Twenty" would pass here
     // while AGENTS.md quietly published a stale count.
     expect(NUMBER_WORDS[countWord?.toLowerCase()]).toBe(named?.length);
   });
