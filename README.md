@@ -240,7 +240,9 @@ robust review:
 
 - **The ground truth is Codex reading author-controlled content.** The
   sweep is strict about *attribution* — only Codex's own reactions,
-  reviews, and clean comments count, ordered by server timestamps — but
+  reviews, and clean comments count, ordered by server timestamps, and a 👍
+  is attributed through REST, where a bot's login carries the `[bot]` suffix
+  a username may not — but
   everything Codex reads (title, body, diff, file contents) is written by
   the pull request's author, instructions to the reviewer included. If
   Codex is talked into reacting 👍 or posting a clean verdict, the result

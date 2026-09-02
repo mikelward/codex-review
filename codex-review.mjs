@@ -133,25 +133,45 @@ const stripBot = (login) => String(login ?? "").replace(/\[bot\]$/, "");
 
 /**
  * Is this login Codex's, spelled either way REST or GraphQL use? Login only
- * — no type evidence asked for or required.
+ * — no type evidence asked for or required, so it never decides a verdict.
  *
- * The one legitimate use is a GraphQL `Reaction.user`: that field is
- * declared as the concrete `User` type, not the polymorphic `Actor`
- * interface, so `__typename` queried on it is a SCHEMA CONSTANT — "User"
- * for every reactor, bot or human, because a non-polymorphic field's
- * `__typename` can never be anything else. Requiring `Bot` there does not
- * harden the reaction channel; it silences it, permanently, for exactly the
- * clean-pass 👍 that is Codex's most common answer. A same-named human
- * account forging a reaction is the accepted residual risk on this one
- * channel — `matchesBot` below is the check for channels (REST reviews and
- * comments) where the account type is real, queryable evidence.
+ * It is the CANDIDATE test for GraphQL reactions. That channel's
+ * `Reaction.user` is declared as the concrete `User` type, not the
+ * polymorphic `Actor` interface, so a `__typename` queried on it is a
+ * SCHEMA CONSTANT — "User" for every reactor, bot or human — and no type
+ * evidence can be had from it at any price. Requiring `Bot` there would
+ * not harden the reaction channel; it would silence it, permanently, for
+ * exactly the clean-pass 👍 that is Codex's most common answer.
+ *
+ * So the login match is where the reaction channel STARTS, not where it
+ * ends: a 👍 matching by login alone is re-read from REST
+ * (`restReactions`), where the same reaction arrives spelled `…[bot]` and
+ * carrying `user.type`, and `matchesBot` decides it there. A same-named
+ * human account is no longer the accepted residual it once was — it is
+ * caught one call later, by the only channel that can see the difference.
+ *
+ * The 👀 keeps deciding on the login alone, and what that is worth is worth
+ * stating exactly. It cannot open the gate: `verdictFor` ranks reading above
+ * approval, so a 👀 standing beside a 👍 publishes `pending`, and a forger
+ * cannot reach `held` either — that is the owner's login, not Codex's. What
+ * a forged 👀 CAN do is keep a head on the clock: a reading head is exempt
+ * from the unanswered-head park (see `UNANSWERED_MINUTES`), so it pins the
+ * minute loop on that head until the reaction is removed. The cost is a
+ * runner bill, not a merge — the same hazard that makes nudges owner-only,
+ * and the reason this is a trade rather than a free pass. Verifying it the
+ * way the 👍 is verified would cost a REST call per sweep on every head
+ * under review, which is the common path; a cheaper shape — verify only
+ * once a 👀 has held a head past the park window, where a genuine one has
+ * become doubtful anyway — is recorded in TODO.md rather than built
+ * unasked.
  */
 export const matchesBotLogin = (login, botLogin = CODEX_BOT) => stripBot(login) === stripBot(botLogin);
 
 /**
  * Is this actor Codex? Takes the whole user object where the caller has one.
- * For REST-sourced actors ONLY (review and comment authors) — see
- * `matchesBotLogin` for GraphQL reactions, where no type evidence exists.
+ * For REST-sourced actors ONLY (review authors, comment authors, and
+ * reactions read back through `restReactions`) — see `matchesBotLogin` for
+ * a GraphQL reaction, where no type evidence exists to check.
  *
  * The login alone is not enough for the bare spelling: app slugs and
  * usernames are separate namespaces, so a HUMAN account named like the bot
@@ -613,13 +633,15 @@ export function readReactions(nodes, { since, owner } = {}) {
   let approved = false;
   let approvedAt = null;
   let staleApproval = false;
+  let unverifiedApproval = false;
   let held = null;
   let reading = false;
   const bound = utc(since);
   for (const r of nodes ?? []) {
     const login = r.user?.login;
-    // matchesBotLogin, not matchesBot: this is GraphQL's Reaction.user,
-    // concretely typed User — no __typename it carries can ever say Bot.
+    // Login alone is the CANDIDATE test — it settles the 👀, which can only
+    // hold the gate closed, and for the 👍 it settles nothing: see the
+    // `matchesBot` call below.
     const codex = matchesBotLogin(login);
     const at = utc(r.createdAt) ?? "";
     // A missing bound or reaction time both mean "cannot show this reaction
@@ -631,7 +653,19 @@ export function readReactions(nodes, { since, owner } = {}) {
     // clean pass leaves no review or comment — the 👍 IS Codex's last word,
     // and a nudge is only pending while it is newer than that word.
     if (r.content === "THUMBS_UP" && codex) {
-      if (fresh) {
+      // Codex's login, but is it Codex's ACCOUNT? App slugs and usernames
+      // are separate namespaces, so a human registered under the bot's name
+      // is a 👍 away from opening the gate — the one fail-open direction
+      // this file has. GraphQL cannot answer that (`matchesBotLogin`), so a
+      // 👍 arriving without type evidence approves nothing here and instead
+      // asks the caller for the REST reading of this same list, where the
+      // account type is real. Freshness is not even considered yet: the
+      // stale-👍 rescue below feeds the check-suite lookup, and paying for
+      // that on an unattributed reaction would be work done for a signal
+      // that may turn out to be a stranger's.
+      if (!matchesBot(r.user)) {
+        unverifiedApproval = true;
+      } else if (fresh) {
         approved = true;
         if (approvedAt === null || at > approvedAt) approvedAt = at;
       } else {
@@ -652,40 +686,81 @@ export function readReactions(nodes, { since, owner } = {}) {
     // waiting on the throttled schedule.
     if (r.content === "EYES" && codex) reading = true;
   }
-  return { approved, approvedAt, staleApproval, held, reading };
+  return { approved, approvedAt, staleApproval, unverifiedApproval, held, reading };
 }
 
 /**
- * Read every page of PR-body reactions.
+ * Every page of PR-body reactions, from the GraphQL connection the PR list
+ * already carried.
  *
  * No short-circuit on finding the thumbs-up: a hold can be on a later page,
  * and stopping early would approve over it. Missing the thumbs-up entirely
  * leaves the status `pending` — safe, but it never clears on its own, and
  * every later sweep refetches the same truncated page.
+ *
+ * The nodes rather than a verdict, because one sweep reads the same list
+ * against as many as three bounds — a check-suite birth record can move the
+ * bound in either direction — and each of those readings used to re-walk
+ * the pagination for a list that cannot change inside one sweep.
  */
-export async function reactionState(api, base, { owner, name, number, since }) {
+export async function reactionNodes(api, base, { owner, name, number }) {
+  const all = [...(base?.nodes ?? [])];
   let page = base;
-  let approved = false;
-  let approvedAt = null;
-  let staleApproval = false;
-  let held = null;
-  let reading = false;
-  for (;;) {
-    const seen = readReactions(page.nodes, { since, owner });
-    approved = approved || seen.approved;
-    if (seen.approvedAt !== null && (approvedAt === null || seen.approvedAt > approvedAt)) {
-      approvedAt = seen.approvedAt;
-    }
-    staleApproval = staleApproval || seen.staleApproval;
-    held = held ?? seen.held;
-    reading = reading || seen.reading;
-    if (!page.pageInfo.hasNextPage) {
-      return { approved, approvedAt, staleApproval, held, reading };
-    }
+  while (page?.pageInfo?.hasNextPage) {
     const data = await api.graphql(MORE_REACTIONS, {
       owner, name, number, after: page.pageInfo.endCursor,
     });
     page = data.repository.pullRequest.reactions;
+    all.push(...(page?.nodes ?? []));
+  }
+  return all;
+}
+
+/**
+ * REST's names for the three reaction contents this file reads. Anything
+ * else passes through unmapped: it matches no rule in `readReactions`
+ * either way, and inventing a name for it would only hide a future content
+ * GitHub adds.
+ */
+const REST_REACTION_CONTENT = { "+1": "THUMBS_UP", "-1": "THUMBS_DOWN", eyes: "EYES" };
+
+/**
+ * The same PR-body reactions, read from REST — the channel that can say WHO
+ * reacted.
+ *
+ * This is the one thing REST has that GraphQL does not: `Reaction.user` in
+ * GraphQL is the concrete `User` type, so its `__typename` is a schema
+ * constant and a bot is indistinguishable from a human of the same name
+ * (see `matchesBotLogin`). REST returns the reactor as a simple-user, which
+ * spells a bot's login with the `[bot]` suffix — illegal in a username, so
+ * self-certifying — and carries `user.type` saying `Bot` besides. Either is
+ * enough for `matchesBot`; both being absent fails closed, which is a
+ * pending gate rather than a merge.
+ *
+ * PR-body reactions live on the ISSUE endpoint — a pull request is an issue
+ * for everything that is not the diff — and the same reactions the GraphQL
+ * connection returns come back here.
+ *
+ * Called only when a 👍 under Codex's login is actually in play, so the
+ * ordinary sweep (no verdict yet, or a verdict already answered by findings)
+ * pays nothing for it: one extra call while a clean pass stands, per head,
+ * per sweep, and none otherwise. Shaped like the GraphQL nodes so
+ * `readReactions` stays one reader with one set of rules.
+ */
+export async function restReactions(api, { owner, name, number }) {
+  const all = [];
+  for (let page = 1; ; page += 1) {
+    const batch = await api.rest(
+      `/repos/${owner}/${name}/issues/${number}/reactions?per_page=100&page=${page}`,
+    );
+    for (const r of batch ?? []) {
+      all.push({
+        content: REST_REACTION_CONTENT[r.content] ?? r.content,
+        createdAt: r.created_at,
+        user: r.user,
+      });
+    }
+    if (!batch || batch.length < 100) return all;
   }
 }
 
@@ -870,11 +945,34 @@ export async function sweep({
     const retargetedAt = newestIn(node.retargets);
     let bound = laterOf(firstSeen, movedAt, retargetedAt);
     // Don't read reactions when the shared head has already decided.
-    let seen = sharedHead
-      ? { approved: false, approvedAt: null, staleApproval: false, held: null, reading: false }
-      : await reactionState(api, node.reactions, {
-        owner, name, number: node.number, since: bound,
-      });
+    const NO_REACTIONS = {
+      approved: false, approvedAt: null, staleApproval: false,
+      unverifiedApproval: false, held: null, reading: false,
+    };
+    // Fetched once and re-read locally against every bound below, so the
+    // rebounds cost no calls at all.
+    let reactions = sharedHead
+      ? []
+      : await reactionNodes(api, node.reactions, { owner, name, number: node.number });
+    const readAt = (since) => readReactions(reactions, { since, owner });
+    let seen = sharedHead ? NO_REACTIONS : readAt(bound);
+    // A 👍 spelled with Codex's login but with nothing to say the account
+    // behind it is Codex. GraphQL cannot answer that for any reactor, so
+    // the whole list is re-read from REST, where a bot's login carries the
+    // `[bot]` suffix a username may not — and `user.type` besides. One call,
+    // paid only while a clean pass is actually standing on this head.
+    if (seen.unverifiedApproval) {
+      reactions = await restReactions(api, { owner, name, number: node.number });
+      seen = readAt(bound);
+      // Still unattributable after the channel that CAN attribute it: either
+      // someone really did register Codex's name and react with it, or
+      // GitHub changed what a reaction's user looks like. Failing closed is
+      // right in both cases, and silence is not — a gate that will never
+      // clear says so in the run log rather than being diagnosed by hand.
+      if (seen.unverifiedApproval) {
+        log(`#${node.number}: 👍 under Codex's login from an account REST does not report as a bot — not approving`);
+      }
+    }
     // A Codex 👍 in play — fresh-looking or stale — is the case where a
     // check-suite birth record can change the answer, in either direction:
     // a suite born on this branch AFTER the 👍 proves the head arrived by
@@ -910,9 +1008,7 @@ export async function sweep({
           const confirmed = laterOf(bound, births.forBranch);
           if (confirmed !== bound) {
             bound = confirmed;
-            seen = await reactionState(api, node.reactions, {
-              owner, name, number: node.number, since: bound,
-            });
+            seen = readAt(bound);
           }
         } else if (undatable) {
           // The 👍's own time goes too: it may be the previous head's last
@@ -940,9 +1036,7 @@ export async function sweep({
         );
         if (better !== null && (bound === null || better < bound)) {
           bound = better;
-          seen = await reactionState(api, node.reactions, {
-            owner, name, number: node.number, since: bound,
-          });
+          seen = readAt(bound);
         }
       }
     }
