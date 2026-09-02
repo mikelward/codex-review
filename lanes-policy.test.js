@@ -50,6 +50,8 @@ describe("the lane policy", () => {
       { verdict: "code", pattern: "README.md" },
       { verdict: "code", pattern: "AGENTS.md" },
       { verdict: "code", pattern: "CLAUDE.md" },
+      { verdict: "code", pattern: "TODO.md" },
+      { verdict: "code", pattern: "docs/CONSUMER.md" },
       { verdict: "docs", pattern: "**/*.md" },
     ]);
     expect(directives.prefixes).toEqual(["docs"]);
@@ -57,18 +59,41 @@ describe("the lane policy", () => {
   });
 
   it("classifies prose as docs, at the root and nested", () => {
-    for (const path of ["TODO.md", "docs/CONSUMER.md"]) {
+    // Prose no test reads. Neither file exists; what is being exercised is
+    // the trailing `**/*.md` rule, which is what keeps the docs lane worth
+    // having — without a case on this side, every rule above could widen to
+    // code and nothing here would notice.
+    for (const path of ["NOTES.md", "docs/notes/scratch.md"]) {
       expect(classify(path), path).toBe("docs");
     }
   });
 
   it("classifies the contract fixtures as code, not prose", () => {
+    // Markdown the suite asserts against. An edit to any of these can break
+    // a test, so a docs-lane skip would let that edit merge green and fail
+    // the next code pull request on prose it never touched.
+    //
     // README.md embeds the consumer workflow templates action.test.js pins
-    // the installed workflows to; AGENTS.md carries the consumer list the
-    // suite derives the check-consumers sweep from (CLAUDE.md is AGENTS.md
-    // by symlink). An edit to any of them can change what the suite
-    // requires, so each must run it.
-    for (const path of ["README.md", "AGENTS.md", "CLAUDE.md"]) {
+    // the installed workflows to. AGENTS.md carries the consumer list the
+    // check-consumers sweep is derived from (CLAUDE.md is AGENTS.md by
+    // symlink). TODO.md is asserted to carry the `## Decisions needing
+    // review` heading the autopilot rule requires. docs/CONSUMER.md has
+    // four sections pinned: the fork limitation with its `checks: write`
+    // scope, the head's-`codex-review-check` limitation, the dispatch
+    // trigger's reason, and the template-migration section.
+    //
+    // This list is deliberately hand-written and NOT exhaustive: it names
+    // what the suite reads today. A test that starts reading some other
+    // markdown file needs a line here and a rule in the policy, and nothing
+    // enforces that — deriving the set instead was tried and abandoned, see
+    // the pull request that added TODO.md and docs/CONSUMER.md.
+    for (const path of [
+      "README.md",
+      "AGENTS.md",
+      "CLAUDE.md",
+      "TODO.md",
+      "docs/CONSUMER.md",
+    ]) {
       expect(classify(path), path).toBe("code");
     }
   });
