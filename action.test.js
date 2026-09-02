@@ -311,7 +311,15 @@ describe("action.yml", () => {
     const named = heading?.[2]
       ?.match(/`([a-z-]+)`/g)
       ?.map((m) => m.slice(1, -1));
-    const listed = sweep.match(/^CONSUMERS="([^"]+)"$/m)?.[1]?.split(" ");
+    // Both lists the sweep iterates, unioned: a private consumer is named
+    // separately because this repository's CI cannot clone it, but AGENTS.md
+    // claims responsibility for it just the same, so leaving it out here
+    // would let the prose and the sweep disagree exactly where the reason
+    // they differ is easiest to forget.
+    const listed = [
+      ...(sweep.match(/^CONSUMERS="([^"]+)"$/m)?.[1]?.split(" ") ?? []),
+      ...(sweep.match(/^PRIVATE_CONSUMERS="([^"]+)"$/m)?.[1]?.split(" ") ?? []),
+    ];
 
     // Spelled-out numbers this prose has actually used or is likely to next;
     // extend it rather than widening the regex above -- an unrecognized word
@@ -335,8 +343,8 @@ describe("action.yml", () => {
     // Both regexes before either comparison: a set difference against an empty
     // set is empty, so a reindented AGENTS.md bullet or a requoted CONSUMERS
     // line would turn the assertion below green while checking nothing.
-    expect(named?.length).toBe(21);
-    expect(listed?.length).toBe(21);
+    expect(named?.length).toBe(22);
+    expect(listed?.length).toBe(22);
     expect([...named].sort()).toEqual([...listed].sort());
     // The count WORD is asserted against the parsed names too, not just
     // pinned to a literal -- otherwise a future enrollment that updates the names
@@ -524,16 +532,23 @@ describe("the migration-ordering rule", () => {
     // debugging a half-settled change on the only repository that charges for
     // the attempt.
     const agents = readFileSync("AGENTS.md", "utf8");
-    const bullet = agents.match(/- \*\*`simmo` is a sibling[\s\S]*?\n(?=- \*\*|## )/)?.[0];
+    const bullet = agents.match(/- \*\*`simmo` is a consumer[\s\S]*?\n(?=- \*\*|## )/)?.[0];
     // Assert the parse found the bullet before trusting anything about it:
     // a match against nothing satisfies every check below.
     expect(typeof bullet).toBe("string");
     // The cost, which is what makes the ordering more than a preference.
-    expect(bullet).toMatch(/private repo/);
-    expect(bullet).toMatch(/Actions minutes/);
+    expect(bullet).toMatch(/private\s+repository/);
+    expect(bullet).toMatch(/billed minutes a month/);
     // The ordering itself, and the reason it is not merely "go slowly".
-    expect(bullet).toMatch(/\*\*last\*\* repository in any\s+fleet-wide migration/);
+    expect(bullet).toMatch(/\*\*last\*\* repository in any\s+fleet-wide\s+migration/);
     expect(bullet).toMatch(/confirmed, never where it is tried/);
+    // Why it is named apart from the others, and what that costs. Both are
+    // easy to lose: the first invites a well-meaning move into CONSUMERS that
+    // turns this repository's CI red forever, and the second is the gap the
+    // separation leaves -- a templates/ change that no job validates against
+    // simmo before it merges.
+    expect(bullet).toMatch(/PRIVATE_CONSUMERS/);
+    expect(bullet).toMatch(/not validated against simmo before it merges/);
   });
 });
 

@@ -24,6 +24,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,6 +40,13 @@ const TEMPLATES = [
 // and the case would pass having checked nothing.
 const CONSUMERS = readFileSync("scripts/check-consumers.sh", "utf8")
   .match(/^CONSUMERS="([^"]+)"/m)?.[1]
+  ?.split(/\s+/);
+
+// The consumers the script names but cannot clone anonymously, read from the
+// script for the same reason: a fixture under a name it does not iterate is
+// never visited, and the case would pass having tested nothing.
+const PRIVATE_CONSUMERS = readFileSync("scripts/check-consumers.sh", "utf8")
+  .match(/^PRIVATE_CONSUMERS="([^"]+)"/m)?.[1]
   ?.split(/\s+/);
 
 /**
@@ -85,34 +93,60 @@ function hub(root, labels) {
  * caller yet. Named after real consumers in the script's own order, since it
  * only visits names it knows.
  */
-function siblings(root, dir, on) {
+function siblings(root, dir, on, rest, privateOn) {
   const sibs = join(root, "sibs");
   mkdirSync(sibs, { recursive: true });
-  on.forEach((want, i) => {
-    const repo = join(sibs, CONSUMERS[i]);
+
+  const place = (name, want) => {
+    const repo = join(sibs, name);
+    if (want === "absent") return;
     if (want === "unadopted") {
       mkdirSync(repo, { recursive: true });
       return;
     }
+    // A shape, optionally with the checker made to crash over this tree:
+    // "old-a!crash" is old-a plus an unrelated workflow holding bytes that are
+    // not UTF-8, which is a real reachable failure -- the checker reads every
+    // workflow, so `read_text()` raises UnicodeDecodeError before any verdict.
+    const [shape, crash] = want.split("!");
     const from =
-      want === "current"
+      shape === "current"
         ? join(dir, "templates")
-        : join(dir, "templates", "superseded", want);
+        : join(dir, "templates", "superseded", shape);
     const workflows = join(repo, ".github", "workflows");
     mkdirSync(workflows, { recursive: true });
-    for (const name of TEMPLATES) {
-      cpSync(join(from, name), join(workflows, name));
+    for (const file of TEMPLATES) {
+      cpSync(join(from, file), join(workflows, file));
     }
-  });
+    if (crash === "crash") {
+      writeFileSync(join(workflows, "unrelated.yml"), Buffer.from([0xff, 0xfe]));
+    }
+  };
+
+  // EVERY consumer gets a tree, not just the ones a case names: the guard
+  // holds a migration open when any consumer went unread, so leaving the
+  // unnamed ones out would put every case into that branch, where it reports
+  // a notice rather than failing -- and the cases about a migration ending
+  // would assert nothing about the verdict they exist for. A case names the
+  // consumers it cares about positionally; `rest` and `privateOn` say what
+  // the others are on, and "absent" is how a case asks for the unread branch
+  // deliberately.
+  CONSUMERS.forEach((name, i) => place(name, i < on.length ? on[i] : rest));
+  for (const name of PRIVATE_CONSUMERS) place(name, privateOn);
   return sibs;
 }
 
 /** Build a hub and consumers, run the sweep over them, return status+output. */
-function sweep({ shapes = [], consumers = [] }) {
+function sweep({
+  shapes = [],
+  consumers = [],
+  rest = "current",
+  privateOn = "current",
+}) {
   const root = mkdtempSync(join(tmpdir(), "check-consumers-"));
   try {
     const dir = hub(root, shapes);
-    const sibs = siblings(root, dir, consumers);
+    const sibs = siblings(root, dir, consumers, rest, privateOn);
     const run = spawnSync("sh", [join(dir, "scripts", "check-consumers.sh"), sibs], {
       encoding: "utf8",
     });
@@ -128,7 +162,9 @@ describe("the finished-migration guard", () => {
     // a tree it never reads, and the assertion passes vacuously.
     expect(CONSUMERS?.length).toBe(21);
     const { status, out } = sweep({ consumers: ["current", "current"] });
-    expect(out).toMatch(/read 2 consumer\(s\), checked 2/);
+    // Every consumer from both lists gets a tree, so a case that names two
+    // still reads the whole fleet.
+    expect(out).toMatch(/read 22 consumer\(s\), checked 22/);
     expect(status).toBe(0);
   });
 
@@ -219,14 +255,22 @@ describe("the finished-migration guard", () => {
     // The checker enumerates shapes with Path.iterdir(), which includes
     // dot-prefixed directories; `*/` does not. A shape the checker offers but
     // this guard never enumerates would stay accepted forever, silently --
-    // the exact failure the guard exists to catch. It is refused as a label
-    // too, so both channels report it; the guard's is the one asserted here.
+    // the exact failure the guard exists to catch.
+    //
+    // The label is also refused as a NAME, which makes every consumer's
+    // checker run exit non-zero, so none of them counts as read and the
+    // verdict is the notice rather than the failure. That is the guard being
+    // consistent, not evasive -- a run that reached no verdict about any
+    // consumer has established nothing about who is still on this shape -- and
+    // the property this case exists for survives either way: the label is
+    // enumerated and named. Asserted in the notice's indented list, which is
+    // the guard's own channel, not the checker's complaint about the name.
     const { status, out } = sweep({
       shapes: [".legacy"],
       consumers: ["current", "current"],
     });
     expect(status).toBe(1);
-    expect(out).toMatch(/still offered:\n {8}\.legacy\n/);
+    expect(out).toMatch(/could not read every consumer:\n {12}\.legacy\n/);
   });
 
   it("does not call a migration finished when nothing was checked", () => {
@@ -236,8 +280,217 @@ describe("the finished-migration guard", () => {
     const { status, out } = sweep({
       shapes: ["old-a"],
       consumers: ["unadopted", "unadopted"],
+      // Every other consumer too: the case is "nothing was checked", and
+      // leaving any of them adopted would check one and make it a different
+      // case.
+      rest: "unadopted",
+      privateOn: "unadopted",
     });
     expect(status).toBe(0);
     expect(out).not.toMatch(/still offered/);
+  });
+});
+
+/**
+ * Run the sweep in its CLONING mode -- no sibling argument -- against a fake
+ * `git` that serves a prepared tree for the names in `clonable` and fails for
+ * every other. It is the only way to reach the clone-failure branch without
+ * the network, and that branch is worth reaching: it decides whether an
+ * unreachable repository is a reported skip or a red job, and either mistake
+ * is silent. Downgrading a public consumer to a skip hides one that has
+ * genuinely gone away; promoting a private one to a failure turns this job
+ * red forever, whatever the consumers actually look like.
+ *
+ * PATH is prepended rather than replaced, since the script still needs the
+ * real sed, grep, mktemp and python3.
+ */
+function sweepCloning({ shapes = [], clonable = [] }) {
+  const root = mkdtempSync(join(tmpdir(), "check-consumers-"));
+  try {
+    const dir = hub(root, shapes);
+
+    // One checkout on the current templates per name the fake git will serve.
+    const served = join(root, "served");
+    mkdirSync(served, { recursive: true });
+    for (const name of clonable) {
+      const workflows = join(served, name, ".github", "workflows");
+      mkdirSync(workflows, { recursive: true });
+      for (const file of TEMPLATES) {
+        cpSync(join(dir, "templates", file), join(workflows, file));
+      }
+    }
+
+    const bin = join(root, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(
+      join(bin, "git"),
+      [
+        "#!/bin/sh",
+        // Loud rather than silent on anything but the one call this stands in
+        // for: a script that started running some other git command would
+        // otherwise get a success it never earned.
+        'test "$1" = clone || { echo "fake git: unexpected: $*" >&2; exit 1; }',
+        "# git clone --quiet --depth 1 <url> <dest>",
+        'name=${5##*/}',
+        'case " $SERVED " in',
+        '  *" $name "*) cp -R "$SERVED_DIR/$name" "$6"; exit 0 ;;',
+        "esac",
+        'echo "remote: Repository not found." >&2',
+        "exit 128",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const run = spawnSync("sh", [join(dir, "scripts", "check-consumers.sh")], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        SERVED: clonable.join(" "),
+        SERVED_DIR: served,
+      },
+    });
+    return { status: run.status, out: `${run.stdout}${run.stderr}` };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+describe("the private-consumer path", () => {
+  it("names a private consumer the script actually iterates", () => {
+    // Same vacuity guard as the public list above: every case here places a
+    // fixture under these names, and a name the script does not visit makes
+    // the assertions pass having read nothing.
+    expect(PRIVATE_CONSUMERS?.length).toBe(1);
+    const { status, out } = sweep({ consumers: ["current"] });
+    expect(out).toMatch(new RegExp(`^== ${PRIVATE_CONSUMERS[0]}$`, "m"));
+    expect(out).toMatch(/read 22 consumer\(s\), checked 22/);
+    expect(status).toBe(0);
+  });
+
+  it("holds a migration open when the private consumer went unread", () => {
+    // The end of a fleet-wide migration IS this shape: simmo goes last by
+    // policy, so every public consumer is on the current templates while it
+    // is still on the outgoing one -- and the cloning run cannot read it.
+    // Calling that finished would delete the shape simmo is still on and turn
+    // its own consumer check red, which is the breakage the guard exists to
+    // prevent, arriving through the guard itself.
+    const { status, out } = sweep({
+      shapes: ["old-a"],
+      consumers: ["current", "current"],
+      privateOn: "absent",
+    });
+    expect(status).toBe(0);
+    // Loud, not silent: the labels are still named, with what to run next.
+    expect(out).toMatch(/notice: no CHECKED consumer is on these superseded/);
+    expect(out).toMatch(/old-a/);
+    expect(out).toMatch(new RegExp(`unread:.*\\b${PRIVATE_CONSUMERS[0]}\\b`));
+    expect(out).not.toMatch(/FAIL: no checked consumer/);
+  });
+
+  it("holds a migration open when a PUBLIC consumer went unread", () => {
+    // The question is being unread, not being private. A local run pointed at
+    // a directory missing one sibling reads nothing about which shape that
+    // sibling is on -- and this mode is the only one that can end a migration,
+    // so treating its blind spot as "gone" is the same mistake with a
+    // different name. `not adopted` is the other way a public consumer goes
+    // unread; both reach this branch through the same list.
+    const missing = CONSUMERS[1];
+    const { status, out } = sweep({
+      shapes: ["old-a"],
+      consumers: ["current", "absent"],
+    });
+    expect(status).toBe(0);
+    expect(out).toMatch(/notice: no CHECKED consumer is on these superseded/);
+    expect(out).toMatch(new RegExp(`unread:.*\\b${missing}\\b`));
+    expect(out).not.toMatch(/FAIL: no checked consumer/);
+  });
+
+  it("holds a migration open when the checker could not reach a verdict", () => {
+    // Invoking the checker is not reading the consumer. A crash produces no
+    // notice, so its live shape looks abandoned -- and counting the name as
+    // read anyway would have had the guard call the migration over and name
+    // the very shape that consumer is still on. The run is red either way;
+    // what this case pins is that it is not also wrong.
+    const crashed = CONSUMERS[1];
+    const { status, out } = sweep({
+      shapes: ["old-a"],
+      consumers: ["current", "old-a!crash"],
+    });
+    expect(status).toBe(1);
+    expect(out).toMatch(/notice: no CHECKED consumer is on these superseded/);
+    expect(out).toMatch(new RegExp(`unread:.*\\b${crashed}\\b`));
+    expect(out).not.toMatch(/FAIL: no checked consumer/);
+  });
+
+  it("still fails once every consumer is read and off the shape", () => {
+    // The other direction, and the one the notice must not have swallowed: a
+    // run that read every consumer has the information to fail on, and a
+    // finished migration is exactly what it must refuse to leave offered.
+    const { status, out } = sweep({
+      shapes: ["old-a"],
+      consumers: ["current", "current"],
+      privateOn: "current",
+    });
+    expect(status).toBe(1);
+    expect(out).toMatch(/still offered:\n {8}old-a\n/);
+    expect(out).not.toMatch(/notice: no CHECKED consumer/);
+  });
+
+  it("keeps a migration open while the private consumer is the one still on it", () => {
+    // Read, and still on the shape: an ordinary in-flight migration, which
+    // must stay quiet whichever consumer is the laggard.
+    const { status, out } = sweep({
+      shapes: ["old-a"],
+      consumers: ["current", "current"],
+      privateOn: "old-a",
+    });
+    expect(status).toBe(0);
+    expect(out).toMatch(/superseded shape `old-a`/);
+    expect(out).not.toMatch(/still offered/);
+    expect(out).not.toMatch(/notice: no CHECKED consumer/);
+  });
+
+  it("reports an unclonable private consumer as a skip, not a failure", () => {
+    // The whole point: this repository's CI clones anonymously, so a private
+    // consumer is unreachable there however correctly it is set up. Reading
+    // that as a failure would leave the hub red on every run forever.
+    const { status, out } = sweepCloning({ clonable: CONSUMERS });
+    expect(status).toBe(0);
+    expect(out).toMatch(
+      new RegExp(`skipped:.*\\b${PRIVATE_CONSUMERS[0]}\\(private, unreachable\\)`),
+    );
+    expect(out).not.toMatch(
+      new RegExp(`FAIL: could not clone ${PRIVATE_CONSUMERS[0]}`),
+    );
+    expect(out).toMatch(
+      new RegExp(`read ${CONSUMERS.length} consumer\\(s\\), checked ${CONSUMERS.length}`),
+    );
+  });
+
+  it("still fails when a PUBLIC consumer cannot be cloned", () => {
+    // The other direction, and the one the skip above must not have widened:
+    // a rename, a revoked clone, a repository that has gone away is exactly
+    // what the clone-failure branch is for, and it stays a red job.
+    const gone = CONSUMERS[0];
+    const { status, out } = sweepCloning({
+      clonable: CONSUMERS.filter((name) => name !== gone),
+    });
+    expect(status).toBe(1);
+    expect(out).toMatch(new RegExp(`FAIL: could not clone ${gone}`));
+  });
+
+  it("checks a private consumer whose clone unexpectedly succeeds", () => {
+    // Degrading in the useful direction: if one is ever opened up, or this job
+    // is ever given a credential, it is checked like any other rather than
+    // staying permanently skipped on the strength of its name.
+    const { status, out } = sweepCloning({
+      clonable: [...CONSUMERS, ...PRIVATE_CONSUMERS],
+    });
+    expect(status).toBe(0);
+    expect(out).toMatch(new RegExp(`^== ${PRIVATE_CONSUMERS[0]}$`, "m"));
+    expect(out).not.toMatch(/skipped:/);
+    expect(out).toMatch(/read 22 consumer\(s\), checked 22/);
   });
 });
