@@ -19,6 +19,7 @@ them all one case rather than eight patches.
 Run with: python3 -m unittest check_consumer_test
 """
 
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -471,7 +472,9 @@ class TheTemplatesThemselves(unittest.TestCase):
 
     def test_starts_on_every_event_a_verdict_can_arrive_through(self):
         # Dropping any of these is a delivery form no consumer hears, and the
-        # gate then waits on the hourly backstop instead of the minute clock.
+        # gate then waits on the four-hourly backstop instead of the minute
+        # clock -- which is a longer wait than it used to be, so the events
+        # matter more than they did, not less.
         for needed in (
             "schedule",
             "pull_request_target",
@@ -480,6 +483,21 @@ class TheTemplatesThemselves(unittest.TestCase):
             "workflow_run",
         ):
             self.assertIn(needed, self.triggers)
+
+    def test_pins_the_backstop_cadence_itself(self):
+        # The trigger check above only asks that a `schedule` key exists, so
+        # the interval -- the thing a cadence change actually changes -- had
+        # nothing asserting it at all: a slip back to hourly, or to anything
+        # else, would leave the whole suite green while quadrupling every
+        # private consumer's bill or quadrupling its worst-case latency
+        # (Codex, PR #38).
+        #
+        # Both halves are pinned deliberately. The `*/4` is the cost and
+        # latency trade documented in docs/CONSUMER.md. The `:23` is not
+        # decoration: on the hour is when GitHub's shared scheduler is most
+        # contended, and a backstop that queues behind a stampede is late
+        # exactly when it is the only thing left.
+        self.assertEqual(self.triggers["schedule"], [{"cron": "23 */4 * * *"}])
 
     def test_keeps_the_pull_request_types_that_each_earn_their_place(self):
         # `edited` is the retarget, which changes the reviewed diff while the
@@ -803,7 +821,12 @@ class SupersededShapes(ConsumerCase):
         # Two at once, because a migration can overlap another. A lookup that
         # returned only the first would accept one shape and reject the other
         # with nothing to say why.
-        older = dict(self.shipped, **{SWEEP: self.sweep.replace("cron: '23 * * * *'", "cron: '7 * * * *'")})
+        older = dict(self.shipped, **{SWEEP: re.sub(r"cron: '[^']*'", "cron: '7 * * * *'", self.sweep)})
+        # The fixture derives from the real template, so it stops being a
+        # fixture the day the template's own schedule changes to match it.
+        # Substituting whatever cron is there keeps that from happening; the
+        # guard stays anyway, because a silently-identical "older" shape would
+        # assert nothing at all.
         self.assertNotEqual(older[SWEEP], self.sweep)
         root = self.templates(self.current, {"push-only": self.shipped, "old-cron": older})
         self.assertEqual(

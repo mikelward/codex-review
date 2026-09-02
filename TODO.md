@@ -116,6 +116,27 @@ theoretical collision.
       to `commentSignals`' contract and a different logical change from
       PR #37, so it gets its own pull request.
 
+## Open gap: a run that cannot list the open pull requests leaves stale verdicts
+
+- [ ] **The one escaping failure that does not fail closed.** `sweep` contains
+      per-head errors and, on a `MAX_FAIL_STREAK` persistence, fails that
+      head's status closed before letting the error out — so the repository's
+      stated posture holds there. A run that cannot list the open pull
+      requests at all is the exception: it publishes nothing, so every head
+      keeps the status it already had. A head carrying `success` that a
+      `reopened` or `edited` event was firing to invalidate then stays
+      mergeable on the previous verdict.
+      Raised by Codex on PR #38 (P1). The failure is not new — an hourly cron
+      had the same hole — but that PR takes the recovery window from ~1 hour
+      to ~4, and under the hourly chain a successor run was usually already
+      queued where now it usually is not.
+      **A shorter schedule is not the fix**: paying 24 fires a day to shorten
+      this window is what the four-hourly cadence exists to stop, and it is a
+      backstop for a case that is already rare. The shape that fits is a retry
+      path for a run that died — plausibly `workflow_run` on this workflow's
+      own failed completion, which needs a guard against retrying a persistent
+      failure forever, and is a template change of its own.
+
 ## Decisions needing review
 
 Guesses made under autopilot, recorded here so nothing decided without the

@@ -34,11 +34,14 @@ inputs:
     default: ${{ github.repository }}
   loop-minutes:
     description: >-
-      How long one run keeps sweeping. The job is the clock, not the
-      schedule -- GitHub throttles a `*/5` cron to a measured 14-minute
-      median, so a run polls for most of an hour and the schedule only has
-      to keep a run alive. `0` sweeps exactly once, which is what a manual
-      invocation wants. Keep the caller's `timeout-minutes` above this.
+      How long one run keeps sweeping while a head is still awaiting. The
+      job is the clock, not the schedule -- GitHub throttles a `*/5` cron to
+      a measured 14-minute median, so polling belongs inside a run rather
+      than across fires. Events wake the run that matters; the four-hourly
+      schedule is only the backstop for what no event reports, and an idle
+      fire exits in about a minute because nothing is awaiting. `0` sweeps
+      exactly once, which is what a manual invocation wants. Keep the
+      caller's `timeout-minutes` above this.
     required: false
     default: '55'
   interval-seconds:

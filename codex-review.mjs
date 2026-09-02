@@ -1584,20 +1584,33 @@ export async function sweep({
  * The scheduled trigger cannot be the clock: GitHub throttles it, and eight
  * measured hours delivered a median gap of 14 minutes against the 5 asked
  * for. So the job itself is the clock — one run polls every minute for most
- * of an hour, and the schedule only has to keep a run alive, which even a
- * throttled schedule does. The workflow's concurrency group holds the next
- * run queued while one loops, so the chain hands over without a gap and the
- * verdict lands within about a poll interval of Codex's reaction.
+ * of an hour, and the verdict lands within about a poll interval of Codex's
+ * reaction.
+ *
+ * What starts that run is an EVENT, not the cron. A push, a comment, and
+ * Codex's own in-place edit of its review summary all wake this workflow, and
+ * the schedule is only the backstop for what none of them report. So there is
+ * deliberately no continuous chain of runs any more: at four-hourly the loop
+ * cannot span the gap between fires, and is not meant to.
  *
  * Always sweeps at least once, so `minutes: 0` is the single pass a one-shot
  * invocation wants. An error escaping a sweep is deliberately NOT caught
- * here — the queued successor starts the moment this run dies, so the chain
- * self-heals in the same motion that reports the failure. But by then it is
- * a real failure: `sweep` contains per-head errors itself (a transient 422
- * on one write must not go red and notify the owner) and escalates only a
- * MAX_FAIL_STREAK-sweep persistence, after failing the head's status
- * closed — so what escapes is that, or a run that could not even list the
- * open PRs.
+ * here: it turns the run red, which is how a persistent failure is reported
+ * rather than absorbed. `sweep` contains per-head errors itself (a transient
+ * 422 on one write must not go red and notify the owner) and escalates only a
+ * MAX_FAIL_STREAK-sweep persistence, AFTER failing that head's status closed —
+ * so what escapes is either that, or a run that could not even list the open
+ * pull requests.
+ *
+ * That last one is the case worth naming, because the schedule no longer
+ * covers it quickly. It publishes nothing at all, so every head keeps the
+ * status it already had — and a head carrying `success` that an event was
+ * firing to invalidate (`reopened` and `edited` exist for exactly that, on an
+ * unchanged SHA) stays mergeable on the old verdict. Recovery is the next
+ * event or the next cron, and the cron is now up to four hours away rather
+ * than one. Under the hourly chain a successor was usually already queued;
+ * it usually is not now. Tracked in TODO.md — closing it needs a retry path,
+ * not a shorter schedule, which is the thing this cadence exists to avoid.
  */
 export async function runLoop({
   minutes, intervalSeconds, sweepOnce, sleep, now = Date.now,

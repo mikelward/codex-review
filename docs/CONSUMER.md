@@ -84,9 +84,10 @@ ref* — so a branch could ship its own version of a job holding
 version does not help when the branch supplies the job around it.
 
 `pull_request_target` does not have that hole: GitHub takes the definition from
-the **base** ref. It is also the only event-driven start available, since
-reactions emit no webhook at all — without it, the first push after a quiet
-spell waits 10–37 measured minutes for a scheduled fire.
+the **base** ref. It is also the event-driven start for a push, since reactions
+emit no webhook at all — without it, the first push after a quiet spell waits
+for a scheduled fire, which on the four-hourly backstop is up to four hours
+rather than the 10–37 measured minutes a throttled hourly cron used to give.
 
 Each type earns its place:
 
@@ -189,15 +190,24 @@ queue behind it — to the 6-hour job default, stalling the gate silently.
 ### The schedule is the backstop, not the clock
 
 Events start a run within seconds; the run polls every minute for up to ~55.
-Everything the hourly schedule alone catches is rare and fails **closed** — a
-dropped webhook leaves the new head pending — and any comment on the pull
-request clears those on demand.
+Codex also edits its review summary comment in place as a review starts and
+finishes, and that edit is an `issue_comment` the sweep wakes on — so even a
+verdict that emits no reaction of its own usually announces itself. Everything
+the schedule alone catches is rare and fails **closed** — a dropped webhook
+leaves the new head pending — and any comment on the pull request clears those
+on demand.
 
-It is hourly, off the hour, for two reasons: `:23` dodges the shared
+It is four-hourly, off the hour, for two reasons: `:23` dodges the shared
 scheduler's `:00` stampede, and on a **private** repository GitHub bills each
 job's duration rounded up to a minute, so idle scheduled fires are the term
-that scales — hourly is ~720 billed minutes a month against `*/15`'s ~2,900.
-Free on a public repository.
+that scales. An idle fire is about a minute — the loop exits as soon as nothing
+is awaiting — so `23 */4 * * *` is ~180 billed minutes a month, against
+hourly's ~720 and `*/15`'s ~2,900. Free on a public repository.
+
+The cost of the wider spacing is latency on the rare thing no event reports:
+worst case the backstop is ~4 hours away rather than ~1. That is the trade the
+cadence makes deliberately, and it is what brings a private repository inside
+the byte-for-byte pin instead of leaving it on a hand-maintained copy.
 
 ### No checkout, one step
 
