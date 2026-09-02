@@ -62,8 +62,9 @@ describe("verdictFor", () => {
   it("stays pending while Codex is reading, even over a 👍", () => {
     // The state that must NOT go `failure`: pending is what the lean gate
     // counts, so this is what keeps the minute loop polling through a
-    // review. Codex swaps its 👀 for 👍 with no webhook — a loop already
-    // idle would leave that 👍 to the throttled schedule, 10–37 minutes.
+    // review. Codex swaps its 👀 for 👍 with no webhook — a loop already idle
+    // would leave that 👍 to whatever wakes next: its own edit of the review
+    // summary comment usually, and failing that the four-hourly backstop.
     expect(verdictFor({ approved: false, reading: true })).toEqual({
       state: "pending",
       description: PENDING,

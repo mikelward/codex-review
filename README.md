@@ -22,8 +22,18 @@ see [Why the workflow lives in your repo](#why-the-workflow-lives-in-your-repo).
 ```yaml
 # Republishes Codex's review verdict as the `codex` commit status a ruleset
 # can require. Codex posts no check run, and a clean pass is only a reaction
-# on the pull request body -- which emits no webhook -- so this polls rather
-# than reacting to an event.
+# on the pull request body -- which emits no webhook -- so a verdict can
+# arrive with nothing to announce it.
+#
+# The event triggers below carry almost all of it: Codex edits its review
+# summary comment in place as a review starts and finishes, and an edit is an
+# `issue_comment` this workflow already wakes on. The schedule is the backstop
+# for what no event reports -- a verdict Codex never delivers, a run that
+# never picked a push up -- so it runs every four hours rather than hourly.
+# On a private repository each firing is billed by the minute, and a backstop
+# that fires 24 times a day to find nothing is the cost with none of the
+# benefit. The `:23` is deliberate: it dodges the on-the-hour stampede that
+# makes a runner queue.
 #
 # Every line below is deliberate, and each wrong setting produces no error at
 # all -- just a merge gate that quietly stops working, or one that can never
@@ -39,7 +49,7 @@ see [Why the workflow lives in your repo](#why-the-workflow-lives-in-your-repo).
 name: codex-review
 on:
   schedule:
-    - cron: '23 * * * *'
+    - cron: '23 */4 * * *'
   pull_request_target:
     types: [opened, reopened, ready_for_review, synchronize, edited, closed]
   issue_comment:
@@ -140,8 +150,12 @@ substituting the sweep's own definition — the quiet route — stays closed,
 and the trigger lists that decide it stay in files a reviewer of the default
 branch can read.
 
-On a private repository, consider dropping the `schedule` block — each idle
-fire bills a rounded-up minute (~720/month at hourly). What it costs you: on
+On a private repository the `schedule` block is cheap enough to keep: each idle
+fire bills a rounded-up minute, and four-hourly is ~180/month. Dropping it is
+still supported, and this used to be the recommendation when the cadence was
+hourly (~720/month) — but a hand-maintained copy is how a consumer's triggers
+drift without the pin noticing, so prefer paying the ~180. What dropping it
+costs you: on
 the **approval** side nothing but latency, since everything the cron backstops
 there is fail-closed and any comment or push clears it on demand. On the
 **hold** side, be honest about what the cron never bought: once a sweep

@@ -149,10 +149,13 @@ describe("action.yml", () => {
   });
 
   it("keeps the loop shorter than an hour and the interval a real poll", () => {
-    // The pair is load-bearing: the loop has to outlast the gap between
-    // scheduled fires for the chain to hand over without a gap, and the
-    // interval has to keep a full-length run inside the token's hourly rate
-    // budget.
+    // The pair is load-bearing, though not for the reason it once was: the
+    // loop used to have to outlast the gap between hourly fires so the chain
+    // handed over continuously. The four-hourly backstop removes that
+    // invariant deliberately — events start the run that matters, and no loop
+    // spans four hours. What still holds the ceiling is the caller's
+    // `timeout-minutes: 65`, which has to stay above it, and the interval has
+    // to keep a full-length run inside the token's hourly rate budget.
     const minutes = Number(inputsBlock.match(/loop-minutes:[\s\S]*?default:\s*'(\d+)'/)?.[1]);
     const seconds = Number(inputsBlock.match(/interval-seconds:[\s\S]*?default:\s*'(\d+)'/)?.[1]);
     expect(minutes > 0 && minutes < 60).toBe(true);
