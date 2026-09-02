@@ -7,6 +7,7 @@ import {
   matchesBot,
   matchesBotLogin,
   readReactions,
+  restReactions,
   findingsOn,
   commentSignals,
   sweep,
@@ -148,9 +149,45 @@ describe("readReactions", () => {
       approved: true,
       approvedAt: "2026-08-14T12:05:00Z",
       staleApproval: false,
+      unverifiedApproval: false,
       held: null,
       reading: false,
     });
+  });
+
+  it("does not approve a 👍 that arrives with no evidence of the account", () => {
+    // What GraphQL returns for every reactor: a bare login on a field typed
+    // `User`. A human may register that username — app slugs and usernames
+    // are separate namespaces — so approving here is the one fail-open move
+    // this file could make. It defers instead, and the caller re-reads the
+    // list from REST.
+    const seen = read([{ content: "THUMBS_UP", createdAt: "2026-08-14T12:05:00Z", user: { login: CODEX_BOT } }]);
+    expect(seen.approved).toBe(false);
+    expect(seen.unverifiedApproval).toBe(true);
+    // Not stale either: staleApproval is what buys the check-suite lookup,
+    // and an unattributed reaction must not spend that call.
+    expect(seen.staleApproval).toBe(false);
+  });
+
+  it("approves a bare login that REST reports as a Bot", () => {
+    const seen = read([
+      { content: "THUMBS_UP", createdAt: "2026-08-14T12:05:00Z", user: { login: CODEX_BOT, type: "Bot" } },
+    ]);
+    expect(seen.approved).toBe(true);
+    expect(seen.unverifiedApproval).toBe(false);
+  });
+
+  it("refuses a 👍 from a same-named account REST reports as a human", () => {
+    // The residual this channel used to carry, now closed: the login
+    // matches, the account is a person, and the gate stays shut. It reads
+    // as unverified rather than as a stranger's reaction on purpose — the
+    // sweep says so in its log, since a squatter is worth naming and a
+    // permanently pending gate is worth explaining.
+    const seen = read([
+      { content: "THUMBS_UP", createdAt: "2026-08-14T12:05:00Z", user: { login: CODEX_BOT, type: "User" } },
+    ]);
+    expect(seen.approved).toBe(false);
+    expect(seen.unverifiedApproval).toBe(true);
   });
 
   it("ignores anyone else's 👍", () => {
@@ -172,6 +209,7 @@ describe("readReactions", () => {
       approved: false,
       approvedAt: null,
       staleApproval: false,
+      unverifiedApproval: false,
       held: null,
       reading: true,
     });
@@ -181,7 +219,8 @@ describe("readReactions", () => {
     expect(
       read([react(CODEX, "THUMBS_UP"), react(CODEX, "EYES")]),
     ).toEqual({
-      approved: true, approvedAt: "2026-08-14T12:05:00Z", staleApproval: false, held: null, reading: true,
+      approved: true, approvedAt: "2026-08-14T12:05:00Z", staleApproval: false, unverifiedApproval: false,
+      held: null, reading: true,
     });
   });
 
@@ -196,6 +235,7 @@ describe("readReactions", () => {
       approved: false,
       approvedAt: null,
       staleApproval: false,
+      unverifiedApproval: false,
       held: null,
       reading: false,
     });
@@ -382,6 +422,52 @@ describe("matchesBotLogin", () => {
   });
 });
 
+describe("restReactions", () => {
+  const api = (pages) => ({
+    calls: [],
+    async rest(path) {
+      this.calls.push(path);
+      const n = Number(new URLSearchParams(path.split("?")[1]).get("page"));
+      return pages[n - 1] ?? [];
+    },
+  });
+
+  it("shapes REST reactions like the GraphQL nodes one reader reads", async () => {
+    const client = api([[
+      { content: "+1", created_at: "2026-08-14T12:05:00Z", user: { login: `${CODEX_BOT}[bot]`, type: "Bot" } },
+      { content: "-1", created_at: "2026-08-14T12:06:00Z", user: { login: "o", type: "User" } },
+      { content: "eyes", created_at: "2026-08-14T12:07:00Z", user: { login: "o", type: "User" } },
+    ]]);
+    expect(await restReactions(client, { owner: "o", name: "r", number: 1 })).toEqual([
+      { content: "THUMBS_UP", createdAt: "2026-08-14T12:05:00Z", user: { login: `${CODEX_BOT}[bot]`, type: "Bot" } },
+      { content: "THUMBS_DOWN", createdAt: "2026-08-14T12:06:00Z", user: { login: "o", type: "User" } },
+      { content: "EYES", createdAt: "2026-08-14T12:07:00Z", user: { login: "o", type: "User" } },
+    ]);
+    expect(client.calls[0]).toBe("/repos/o/r/issues/1/reactions?per_page=100&page=1");
+  });
+
+  it("reads the PR-body reactions, which live on the issue endpoint", async () => {
+    const client = api([[]]);
+    await restReactions(client, { owner: "o", name: "r", number: 7 });
+    expect(client.calls).toEqual(["/repos/o/r/issues/7/reactions?per_page=100&page=1"]);
+  });
+
+  it("pages to the end — a 👍 on a later page is still the verdict", async () => {
+    const filler = Array.from({ length: 100 }, () => (
+      { content: "heart", created_at: "2026-08-14T12:00:00Z", user: { login: "passer-by", type: "User" } }
+    ));
+    const client = api([filler, [
+      { content: "+1", created_at: "2026-08-14T12:05:00Z", user: { login: `${CODEX_BOT}[bot]`, type: "Bot" } },
+    ]]);
+    const all = await restReactions(client, { owner: "o", name: "r", number: 1 });
+    expect(all.length).toBe(101);
+    expect(all.at(-1).content).toBe("THUMBS_UP");
+    // A content with no rule keeps REST's own name rather than being
+    // invented into a GraphQL one that does not exist here.
+    expect(all[0].content).toBe("heart");
+  });
+});
+
 describe("sharedHeads", () => {
   it("names only the SHAs carried by more than one PR", () => {
     expect([...sharedHeads([{ headRefOid: "a" }, { headRefOid: "a" }, { headRefOid: "b" }])]).toEqual(["a"]);
@@ -443,6 +529,20 @@ const thumbs = (login = `${CODEX_BOT}[bot]`, createdAt = AFTER) => ({
   createdAt,
   user: { login },
 });
+// What GraphQL actually returns for a bot's reaction: the login with no
+// `[bot]` suffix, on a field typed `User`, so nothing on it says Bot.
+const bareThumbs = (createdAt = AFTER) => ({
+  content: "THUMBS_UP",
+  createdAt,
+  user: { login: CODEX_BOT },
+});
+// The same reaction read back from REST, where a bot's login carries the
+// suffix a username may not, and `user.type` says so besides.
+const restThumbs = (user = { login: `${CODEX_BOT}[bot]`, type: "Bot" }, created_at = AFTER) => ({
+  content: "+1",
+  created_at,
+  user,
+});
 const hold = (content = "THUMBS_DOWN", login = OWNER) => ({
   content,
   createdAt: AFTER,
@@ -455,8 +555,8 @@ const hold = (content = "THUMBS_DOWN", login = OWNER) => ({
 // paging but not `since` — the code under test re-filters by created_at.
 function fakeFetch({
   graphqlResponses = [], statuses = {}, issueComments = {}, prReviews = {},
-  reviewThreadComments = {}, checkSuites = {}, failStatusWrite = false,
-  failComments = false,
+  reviewThreadComments = {}, checkSuites = {}, issueReactions = {},
+  failStatusWrite = false, failComments = false,
 } = {}) {
   const calls = [];
   const queue = [...graphqlResponses];
@@ -479,6 +579,12 @@ function fakeFetch({
         status: 200,
         json: async () => ({ check_suites: all.slice((page - 1) * 100, page * 100) }),
       };
+    }
+    if (path.includes("/reactions")) {
+      const number = path.split("/issues/")[1].split("/")[0];
+      const page = Number(new URLSearchParams(path.split("?")[1] ?? "").get("page") ?? 1);
+      const all = issueReactions[number] ?? [];
+      return { ok: true, status: 200, json: async () => all.slice((page - 1) * 100, page * 100) };
     }
     if (path.includes("/comments")) {
       if (failComments) return { ok: false, status: 500, json: async () => ({}) };
@@ -541,6 +647,69 @@ describe("sweep", () => {
       graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
     });
     expect((await run(fake))[0].state).toBe("success");
+  });
+
+  it("verifies a bare-login 👍 against REST before approving", async () => {
+    // GraphQL spells a bot's login bare, and its `Reaction.user` is typed
+    // `User`, so nothing there separates Codex from a human of the same
+    // name. REST spells it `…[bot]` — illegal in a username — so the same
+    // reaction, read there, is attributable.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      checkSuites: { abc1234: [bornSuite()] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([bareThumbs()]) })])],
+      issueReactions: { 1: [restThumbs()] },
+    });
+    expect((await run(fake))[0].state).toBe("success");
+    expect(fake.calls.some((c) => c.path.startsWith("/repos/o/r/issues/1/reactions"))).toBe(true);
+  });
+
+  it("refuses the 👍 when REST reports the reactor as a human", async () => {
+    // The squatting case the login alone could never catch: a person
+    // registered under the bot's name reacts 👍, and the gate stays shut.
+    const lines = [];
+    const fake = fakeFetch({
+      // A standing `success` from before the squatter's 👍 was refused, so
+      // the refusal has something to write: an identical status is skipped.
+      statuses: { abc1234: [gate(GATED_AT, "success")] },
+      checkSuites: { abc1234: [bornSuite()] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([bareThumbs()]) })])],
+      issueReactions: { 1: [restThumbs({ login: CODEX_BOT, type: "User" })] },
+    });
+    const written = (await sweep({
+      owner: OWNER, name: "r", token: "t", fetchImpl: fake.impl,
+      log: (l) => lines.push(l), now: TEST_NOW,
+    })).written;
+    expect(written[0].state).toBe("pending");
+    // A gate that will never clear on its own says why in the run log.
+    expect(lines.some((l) => l.includes("not approving"))).toBe(true);
+  });
+
+  it("pays no REST call for a head with no 👍 in play", async () => {
+    // The verification is bought only where it decides something: a head
+    // Codex has not answered costs exactly what it did before.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([hold("EYES", "passer-by")]) })])],
+    });
+    await run(fake);
+    expect(fake.calls.some((c) => c.path.includes("/reactions"))).toBe(false);
+  });
+
+  it("re-reads the verified list locally when a check suite moves the bound", async () => {
+    // The rebound paths used to re-walk the reaction pagination for a list
+    // that cannot change inside one sweep; now they cost nothing. One REST
+    // read, however many bounds the head is judged against.
+    const fake = fakeFetch({
+      // A status later than the 👍, so the 👍 reads stale and the
+      // earliest-suite rescue lowers the bound and revives it.
+      statuses: { abc1234: [gate("2026-08-14T12:10:00Z")] },
+      checkSuites: { abc1234: [bornSuite("2026-08-14T11:59:00Z")] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([bareThumbs()]) })])],
+      issueReactions: { 1: [restThumbs()] },
+    });
+    expect((await run(fake))[0].state).toBe("success");
+    expect(fake.calls.filter((c) => c.path.includes("/reactions")).length).toBe(1);
   });
 
   it("ignores a thumbs-up from anyone else", async () => {

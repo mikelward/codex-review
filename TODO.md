@@ -68,28 +68,56 @@ first.
 **Reversible:** one condition in `judge` plus three tests; the fix-and-nudge
 round (old findings, fresh 👍) still approves, and a test pins it.
 
-### matchesBot requires type evidence for the bare login spelling — on REST only
+### matchesBot requires type evidence for the bare login spelling — everywhere
 
 **Decided (2026-08-17, security pass; revised 2026-08-18 after Codex
-review):** the suffixed spelling (`…[bot]`) certifies itself — brackets are
-illegal in usernames — but the bare spelling needs the account type to say
-Bot. The first pass asked for that evidence on every channel, including
-GraphQL's `Reaction.user`; Codex correctly flagged that field as declared
-the concrete `User` type rather than the polymorphic `Actor` interface, so
-its `__typename` is a schema constant ("User") for every reactor, bot or
-human — the check could never pass, which would have silently blocked
-Codex's own clean-pass 👍 on every consumer forever. `matchesBot` (type
-evidence required) is now for REST-sourced actors only — review and comment
-authors, where `user.type` is real; `matchesBotLogin` (login only, no type
-evidence) covers the GraphQL reaction, with the residual risk — a
-same-named human account forging a reaction — named at its definition.
+review; residual closed 2026-09-02):** the suffixed spelling (`…[bot]`)
+certifies itself — brackets are illegal in usernames — but the bare
+spelling needs the account type to say Bot. The first pass asked for that
+evidence on every channel, including GraphQL's `Reaction.user`; Codex
+correctly flagged that field as declared the concrete `User` type rather
+than the polymorphic `Actor` interface, so its `__typename` is a schema
+constant ("User") for every reactor, bot or human — the check could never
+pass, which would have silently blocked Codex's own clean-pass 👍 on every
+consumer forever. So the reaction channel was left attributing by login
+alone, with the residual risk — a same-named human account forging a
+reaction — named at `matchesBotLogin`.
+
+**The residual is now closed, and not by adding a field GraphQL does not
+have.** It was never a missing-field problem: it was the wrong channel.
+REST returns the same PR-body reactions with the reactor as a simple-user,
+which spells a bot's login `…[bot]` — self-certifying on its own — and
+carries `user.type` besides. So a 👍 matching by login alone no longer
+approves anything: it flags `unverifiedApproval`, and `judge` re-reads the
+whole list from `restReactions`, where `matchesBot` decides it on the same
+terms as a review or comment author. One extra REST call, paid only while a
+clean pass is actually standing on a head, and none on a sweep with no 👍 in
+play; the rebound readings that used to re-walk the GraphQL pagination now
+cost nothing, so a judged head is no more expensive than before in the
+common case.
+
+**Still on the login alone: the 👀 — and its cost is not zero.** It cannot
+open the gate (`verdictFor` ranks reading above approval, and a forger
+cannot reach `held`, which keys on the owner's login), so a forged one
+never merges anything. But a reading head is exempt from the unanswered-head
+park, so a forged 👀 pins the minute loop on that head until it is removed:
+a runner bill, which is the same hazard that makes nudges owner-only.
+Verifying it the way the 👍 is verified would cost a REST call per sweep on
+every head under review — the common path — to defend the cheap direction.
+
+- [ ] **Decide whether to verify the 👀 too, on the bounded shape.** Escalate
+      to `restReactions` only once a 👀 has held a head past
+      `UNANSWERED_MINUTES`: a genuine 👀 is answered in minutes, so the call
+      is paid only where the reaction has already become doubtful, and the
+      unbounded runner bill above goes away. Left unbuilt because it changes
+      loop behavior, not just attribution, and this pull request is about
+      attribution.
 
 **Alternative:** trust GitHub's squatting protections, which are policy,
-not API guarantee, on every channel including the one that cannot be
-hardened without breaking it.
+not API guarantee.
 
-**Reversible:** the two functions and the query strings; fixtures using the
-suffixed spelling never notice either way.
+**Reversible:** the escalation is one branch in `judge` plus `restReactions`;
+dropping it returns the reaction channel to login-only attribution.
 
 ### AGENTS.md moved to the code lane
 
