@@ -43,6 +43,79 @@ trust model than the file-only one every consumer relies on today. Revisit
 if a consumer's own self-hosted fleet ever makes this more than a
 theoretical collision.
 
+## Open gap: a recreated branch at the same SHA dates its arrival too early
+
+- [ ] **`checkSuiteBirths` picks the EARLIEST branch-born suite, floored only
+      by the last force-push on this pull request.** Reuse a branch NAME for a
+      SHA it already carried — close the old pull request, recreate the branch
+      at the same commit, open a new one — and there is no force-push event on
+      the new pull request, so no floor: `forBranch` returns the previous
+      life's suite and the fresh arrival is dated too early. It then parks on
+      its first sweep, before Codex's pickup window opens, and a reaction-only
+      answer waits for an event or the schedule.
+      Raised by Codex on PR #37 against the `UNANSWERED` escalation, and real
+      — but **not introduced by it**: an inherited `PENDING` parks identically,
+      which `parks an inherited marker on a recreated branch exactly as it
+      parks PENDING` now pins. The limitation belongs to the arrival-dating
+      machinery.
+      Not fixed there because that machinery is also what stops a rewound
+      head's 👍 approving a commit nobody reviewed (see the force-push
+      reasoning inside `checkSuiteBirths`), so widening what counts as an
+      arrival is a change to the approval path's safety, not a local fix. It
+      needs its own change with its own reasoning: probably a floor derived
+      from the pull request's own creation time rather than only from
+      force-pushes.
+
+## Open gap: a transient override costs the park its wording for one window
+
+- [ ] **A status is commit-scoped; a park is really pull-request-scoped, and
+      nothing yet tells the two apart.** When a shared head, a hold, or
+      `UNREADABLE` is written over an `UNANSWERED` marker, the next healthy
+      sweep reads only the newest status, does not see the park, and writes
+      `PENDING` — so the head loses the escalated wording for one
+      `UNANSWERED_MINUTES` window before earning it back.
+      Raised by Codex on PR #37, where it was fixed by reading past the
+      override and then **reverted in the same PR** once Codex showed the fix
+      was worse than the gap: on a shared head the override is the ONLY status
+      dating the newer pull request's life, so reading past it lands on a
+      marker belonging to a *different* pull request on the same commit and
+      parks a brand-new one on sight. Two pull requests from one branch to
+      different bases is the concrete shape.
+      The polling cost is not new — before the marker existed the same
+      override was replaced by `PENDING` and ran the same window — so what is
+      lost is the wording, for one window, on a head where nothing happened.
+      **It depends on the gap above**: distinguishing "our park, this pull
+      request" from "a park this commit carries" needs an arrival its records
+      can prove, which is the same thing `checkSuiteBirths` cannot currently
+      establish. Fix that first; this falls out of it.
+
+## Open gap: the nudge the escalation advertises only works for the owner
+
+- [ ] **`commentSignals` counts `@codex review` as a nudge only from the
+      repository owner** (`c.user?.login === owner`), and that is deliberate:
+      `nudged` closes the gate, so accepting it from anyone who can comment
+      would hand any commenter a merge block. But the `UNANSWERED` description
+      added in PR #37 tells whoever reads the check to comment `@codex review`,
+      and for a collaborator that instruction is only half true — Codex does
+      review, so a review or a finding comment still wakes the sweep by
+      webhook, but a clean 👍 emits nothing and the head waits for the
+      schedule rather than resuming the fast clock.
+      Raised by Codex on PR #37. Real, and the wording is what made it
+      visible — the underlying stall predates it, since a non-owner's nudge
+      never restarted polling.
+      Neither remedy Codex proposed fits: widening the nudge reopens the
+      merge-block vector, and owner-qualifying the text is not available
+      either — `UNANSWERED` is a module constant the stickiness compares
+      byte for byte off the head, so interpolating a login would make the
+      marker per-repository and the comparison fragile, inside GitHub's
+      140-character description cap.
+      The shape that does fit is a separate signal: treat ANY commenter's
+      `@codex review` as a reason to resume polling, while still requiring
+      the owner's to HOLD the gate. Waking costs runner minutes and is
+      bounded by `UNANSWERED_MINUTES`; it can block nothing. That is a change
+      to `commentSignals`' contract and a different logical change from
+      PR #37, so it gets its own pull request.
+
 ## Decisions needing review
 
 Guesses made under autopilot, recorded here so nothing decided without the

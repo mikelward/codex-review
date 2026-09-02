@@ -20,6 +20,8 @@ import {
   newestIn,
   input,
   cleanVerdict,
+  UNANSWERED,
+  UNANSWERED_FORK,
   reviewTableStatus,
 } from "./codex-review.mjs";
 
@@ -515,8 +517,8 @@ const OWNER = "o";
 
 // The marker: the earliest `codex` status on the head, saying when it was
 // first gated. A reaction has to be newer than this to count as approval.
-const gate = (created_at = GATED_AT, state = "pending") =>
-  ({ context: CONTEXT, state, description: PENDING, created_at });
+const gate = (created_at = GATED_AT, state = "pending", description = PENDING) =>
+  ({ context: CONTEXT, state, description, created_at });
 
 // The suite born on the PR's own branch — what dates a same-repo head's
 // arrival. Approval fixtures need one: a head with no branch-born suite is
@@ -950,6 +952,34 @@ describe("sweep", () => {
     const out = await runFull(fake);
     expect(out.awaiting).toBe(1);
     expect(out.written[0].description).toBe(FINDINGS);
+  });
+
+  it("approves a FORK head on a clean comment, where its 👍 cannot", async () => {
+    // The premise of the fork park's wording, asserted as behavior rather
+    // than left implied by the sentence (Codex, PR #37). `judge` refuses a
+    // fork head's 👍 because GitHub stamps no `head_branch` on a fork's
+    // suites, so its arrival is undatable — but a clean COMMENT names the
+    // commit it read, which is the attribution the reaction lacks, so
+    // `cleanIsLatest` approves here with no suite consulted at all.
+    //
+    // Without this, the only thing pinning that asymmetry is the wording
+    // test — and a wording test cannot notice the day someone gates
+    // `cleanIsLatest` on the suites too, which would leave the published
+    // sentence promising a remedy the code had quietly stopped honoring.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [{
+          user: { login: `${CODEX_BOT}[bot]` },
+          created_at: AFTER,
+          body: "Codex Review: Didn\u0027t find any major issues.\n\n**Reviewed commit:** `abc1234`",
+        }],
+      },
+      graphqlResponses: [repoPRs([prNode({ isCrossRepository: true })])],
+    });
+    const out = await runFull(fake);
+    expect(out.written[0].state).toBe("success");
+    expect(out.awaiting).toBe(0);
   });
 
   it("approves on a clean comment that names this head", async () => {
@@ -1852,6 +1882,50 @@ describe("sweep", () => {
     expect(out.written[0].state).toBe("pending");
   });
 
+  it("publishes wording that names the failure and its remedy", () => {
+    // Every other test here compares production output back to the constant
+    // it imported, which proves the code writes the marker but says nothing
+    // about what the marker SAYS -- reword the constant and they all still
+    // pass (Codex, PR #37). That hole matters more here than it would
+    // anywhere else in this file: the description is not an internal token
+    // but an instruction, published to every consumer's merge gate and read
+    // by a person deciding what to do. So the text is pinned, and a reword
+    // is a deliberate edit rather than something that slides through.
+    expect(UNANSWERED).toBe("Codex has not answered this head — comment @codex review");
+    // The two properties that make it work, stated separately so a future
+    // reword knows what it has to keep. The remedy has to be copy-pasteable
+    // rather than paraphrased...
+    expect(UNANSWERED).toContain("@codex review");
+    // ...and it has to survive the trip: GitHub truncates a commit-status
+    // description at 140 characters, and a truncated instruction is a
+    // broken one.
+    expect(UNANSWERED.length).toBeLessThan(141);
+  });
+
+  it("publishes a fork remedy that a fork maintainer can actually take", () => {
+    // Same reasoning, and it matters more here: this wording exists
+    // precisely because the other one names an impossible action on a fork
+    // head, so a reword that lost the remedy would restore the bug it was
+    // added to fix.
+    expect(UNANSWERED_FORK).toBe(
+      "A fork head\u0027s 👍 cannot be accepted — comment @codex review, or merge by admin override",
+    );
+    // It keeps the ordinary remedy, which the first version of this wording
+    // wrongly dropped (Codex, PR #37): only the REACTION channel is closed
+    // on a fork. `cleanlyApproved` is `approvedIsLatest || cleanIsLatest`,
+    // and `cleanIsLatest` never consults `checkSuiteBirths` — so a clean
+    // comment naming this SHA approves a fork head exactly as it would any
+    // other, and a re-review can genuinely settle it.
+    expect(UNANSWERED_FORK).toContain("@codex review");
+    // ...and it keeps the fallback for when Codex answers with the 👍 alone,
+    // which is the case that cannot be accepted here.
+    expect(UNANSWERED_FORK).toContain("admin override");
+    // The claim it must NOT make is the absolute one: an over-claim here
+    // sends a maintainer to an admin override past a remedy that works.
+    expect(UNANSWERED_FORK).not.toMatch(/cannot approve/);
+    expect(UNANSWERED_FORK.length).toBeLessThan(141);
+  });
+
   it("parks an unanswered head after UNANSWERED_MINUTES", async () => {
     // Codex answers within minutes of the event that woke it or it never
     // started — a forgotten PR with no verdict must not keep every loop
@@ -1867,8 +1941,310 @@ describe("sweep", () => {
     });
     // Inside the window the head keeps the fast clock…
     expect((await at("2026-08-14T12:29:00Z")).awaiting).toBe(1);
-    // …and past it the loop parks, with nothing written over the gate.
+    // …and past it the loop parks.
     const parked = await at("2026-08-14T12:31:00Z");
+    expect(parked.awaiting).toBe(0);
+    // And it SAYS so — the exported `UNANSWERED` description — rather than
+    // parking silently. This used to assert
+    // nothing was written, which left `PENDING` standing on the one head
+    // that needs a person -- spelled identically to a review still in
+    // flight. The status is the only channel that costs nothing: the sweep
+    // already holds `statuses: write` and is already this head's writer, so
+    // no comment, assignment or new permission is involved.
+    expect(parked.written).toEqual([
+      { number: 1, state: "pending", description: UNANSWERED },
+    ]);
+  });
+
+  it("tells a fork head the remedy that actually works", async () => {
+    // Codex, PR #37. A fork head is undatable forever -- GitHub reports no
+    // `head_branch` for its suites -- so `judge` refuses its 👍 by design,
+    // and the ordinary marker would tell the maintainer to ask for a review
+    // whose clean answer is rejected identically. Publishing an instruction
+    // that provably cannot work is worse than the silence this change
+    // replaced, so the fork case names the remedy the code already
+    // documents: an admin override, or a re-push to a branch in this repo.
+    const parked = await sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: { abc1234: [gate("2026-08-14T12:00:00Z")] },
+        graphqlResponses: [repoPRs([prNode({ isCrossRepository: true })])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
+    });
+    expect(parked.awaiting).toBe(0);
+    expect(parked.written).toEqual([
+      { number: 1, state: "pending", description: UNANSWERED_FORK },
+    ]);
+  });
+
+  it("says the fork remedy exactly once, like any other marker", async () => {
+    // The stickiness reads the marker back off the head, so it has to
+    // recognize BOTH wordings -- a fork head that re-escalated every sweep
+    // would walk its gate marker forward exactly as the same-repo one would.
+    const parked = await sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: { abc1234: [
+          gate("2026-08-14T12:30:00Z", "pending", UNANSWERED_FORK),
+          gate("2026-08-14T11:00:00Z"),
+        ] },
+        graphqlResponses: [repoPRs([prNode({ isCrossRepository: true })])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
+    });
+    expect(parked.awaiting).toBe(0);
+    expect(parked.written).toEqual([]);
+  });
+
+  it("re-words an inherited marker for the head it is now on", async () => {
+    // Codex, PR #37. Making the ESCALATION topology-aware was half the job:
+    // the sticky read replayed whatever the commit already wore, so a SHA
+    // parked in a same-repo pull request and later reused as a fork head
+    // kept advertising `@codex review` -- the instruction that provably
+    // cannot work there, arriving by inheritance instead of by escalation.
+    // The marker is a function of the head's topology, never of what a
+    // previous life wrote, so it is recomputed rather than replayed.
+    const asFork = await sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: { abc1234: [gate("2026-08-14T11:00:00Z", "pending", UNANSWERED)] },
+        graphqlResponses: [repoPRs([prNode({ isCrossRepository: true })])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
+    });
+    expect(asFork.written).toEqual([
+      { number: 1, state: "pending", description: UNANSWERED_FORK },
+    ]);
+    // And the other direction: the owner re-pushes a fork contribution to a
+    // branch here, so `@codex review` starts working and the admin-override
+    // wording stops being the remedy.
+    const asOwn = await sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: { abc1234: [gate("2026-08-14T11:00:00Z", "pending", UNANSWERED_FORK)] },
+        graphqlResponses: [repoPRs([prNode()])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
+    });
+    expect(asOwn.written).toEqual([
+      { number: 1, state: "pending", description: UNANSWERED },
+    ]);
+  });
+
+  it("clears an inherited fork marker on a fresh window too", async () => {
+    // The clear means "we are still polling, so take the marker back", and
+    // that is true of BOTH wordings -- a fork head force-pushed back onto a
+    // parked commit is as much a fresh arrival as any other. Pinned because
+    // the probe found this the one place the fork marker was not yet
+    // recognized: a clear that only knew the same-repo sentence left a fork
+    // head advertising a remedy while the window it was given was still
+    // running.
+    const moved = await sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: { abc1234: [gate("2026-08-14T11:00:00Z", "pending", UNANSWERED_FORK)] },
+        graphqlResponses: [repoPRs([prNode({
+          isCrossRepository: true,
+          forcePushes: { nodes: [{ createdAt: "2026-08-14T12:30:00Z" }] },
+        })])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
+    });
+    expect(moved.awaiting).toBe(1);
+    expect(moved.written).toEqual([
+      { number: 1, state: "pending", description: PENDING },
+    ]);
+  });
+
+  it("parks a comment-only finding without calling it unanswered", async () => {
+    // Codex, PR #37. The FINDINGS fast-exit above needs `reviewedAt`, so a
+    // finding left as a bare COMMENT — no submitted review — falls through
+    // to the age path with FINDINGS standing. Escalating there would be
+    // false (Codex answered) and, worse, unstable: `findings` outranks
+    // `unanswered` in `verdictFor`, so the next sweep writes FINDINGS back,
+    // that change re-anchors the age, and the head flaps between the two
+    // every UNANSWERED_MINUTES forever — walking its gate marker forward
+    // each time, which is the failure the stickiness exists to prevent.
+    const parked = await sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: { abc1234: [gate("2026-08-14T12:00:00Z", "pending", FINDINGS)] },
+        issueComments: { 1: [{ user: { login: `${CODEX_BOT}[bot]` }, created_at: AFTER }] },
+        graphqlResponses: [repoPRs([prNode()])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
+    });
+    // The clock still lets go — that half is right and unchanged.
+    expect(parked.awaiting).toBe(0);
+    // But nothing is rewritten: the head keeps the true, more specific word.
+    expect(parked.written).toEqual([]);
+  });
+
+  it("parks an inherited marker on a recreated branch exactly as it parks PENDING", async () => {
+    // Codex, PR #37: a branch name reused for the same SHA carries BOTH an
+    // old status and an old branch-born suite, and with no force-push on
+    // the new pull request there is no floor to exclude either -- so
+    // `forBranch` picks the previous life's suite and the fresh arrival
+    // parks at once.
+    //
+    // Real, and NOT introduced by the escalation: this asserts the two
+    // descriptions behave identically, so the limitation belongs to the
+    // arrival-dating machinery rather than to UNANSWERED. Fixing it means
+    // changing what dates an arrival, which also guards the approval path
+    // against a rewound head's 👍 -- a much larger blast radius than this
+    // change, and tracked separately.
+    const withStatus = (description) => sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: { abc1234: [gate("2026-08-14T11:00:00Z", "pending", description)] },
+        checkSuites: { abc1234: [bornSuite("2026-08-14T11:00:00Z"), bornSuite("2026-08-14T12:30:00Z")] },
+        graphqlResponses: [repoPRs([prNode()])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
+    });
+    expect((await withStatus(PENDING)).awaiting).toBe(0);
+    expect((await withStatus(UNANSWERED)).awaiting).toBe(0);
+  });
+
+  it("does not let its own escalation restart the window", async () => {
+    // The age anchor is our last status write, and the escalation is a
+    // write — so counting it resets the very window that produced it, and
+    // the head polls another full one having already given up. The older
+    // PENDING is the real anchor; the UNANSWERED on top of it reports the
+    // wait rather than restarting it.
+    const parked = await sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: {
+          abc1234: [
+            gate("2026-08-14T12:30:00Z", "pending", UNANSWERED),
+            gate("2026-08-14T11:00:00Z"),
+          ],
+        },
+        graphqlResponses: [repoPRs([prNode()])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
+    });
+    expect(parked.awaiting).toBe(0);
+    // Already said: the identical write is skipped, so the marker stays put.
+    expect(parked.written).toEqual([]);
+  });
+
+  it("gives a reused commit its own window despite an inherited marker", async () => {
+    // A status belongs to the COMMIT, so a commit that earned UNANSWERED
+    // once — reused as another pull request's head, or fast-forwarded back
+    // onto a branch — arrives already wearing it. Parking on sight would
+    // deny the new arrival its pickup window before Codex has even been
+    // asked, which is the failure the branch-born-suite re-anchor exists to
+    // stop. The suite here is born a minute ago: the head is NEW, whatever
+    // its inherited status says.
+    const parked = await sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: { abc1234: [gate("2026-08-14T11:00:00Z", "pending", UNANSWERED)] },
+        checkSuites: { abc1234: [bornSuite("2026-08-14T12:30:00Z")] },
+        graphqlResponses: [repoPRs([prNode()])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
+    });
+    expect(parked.awaiting).toBe(1);
+    // And the inherited wording is CLEARED, not just ignored. This used to
+    // assert nothing was written, which left the head telling the
+    // maintainer to nudge for the whole fresh window while Codex was
+    // queued normally -- a false instruction, published to every consumer
+    // (Codex, PR #37). The sticky read in `verdictFor` cannot know better;
+    // this path can, because the branch-born suite has just dated the
+    // arrival, on a call this path already paid for.
+    expect(parked.written).toEqual([
+      { number: 1, state: "pending", description: PENDING },
+    ]);
+  });
+
+  it("clears only the inherited marker, never a finding", async () => {
+    // The clear is guarded on the wording for a reason: a comment-only
+    // finding reaches this path too (the FINDINGS fast-exit needs
+    // `reviewedAt`, which a bare comment has none of), and a fresh branch
+    // suite would then rewrite its accurate FINDINGS to PENDING -- reopening
+    // the gate's wording on a head Codex has actually answered. Only the
+    // marker this loop wrote itself is safe to take back.
+    const kept = await sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: { abc1234: [gate("2026-08-14T11:00:00Z", "pending", FINDINGS)] },
+        checkSuites: { abc1234: [bornSuite("2026-08-14T12:30:00Z")] },
+        issueComments: { 1: [{ user: { login: `${CODEX_BOT}[bot]` }, created_at: AFTER }] },
+        graphqlResponses: [repoPRs([prNode()])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
+    });
+    expect(kept.awaiting).toBe(1);
+    expect(kept.written).toEqual([]);
+  });
+
+  it("clears an inherited marker on a force-push back onto the same SHA", async () => {
+    // Codex, PR #37. `bound` includes `movedAt`, so a force-push away and
+    // back to an already-parked commit makes the window fresh at the FIRST
+    // age check -- above the branch-born re-anchor, where the clear used to
+    // live alone. The head kept the clock (right) while still telling the
+    // maintainer to nudge a review the synchronize event had just queued
+    // (wrong). Polling and the marker are complements: any path that keeps
+    // the clock has to take it back.
+    const moved = await sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: { abc1234: [gate("2026-08-14T11:00:00Z", "pending", UNANSWERED)] },
+        graphqlResponses: [repoPRs([prNode({
+          forcePushes: { nodes: [{ createdAt: "2026-08-14T12:30:00Z" }] },
+        })])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
+    });
+    expect(moved.awaiting).toBe(1);
+    expect(moved.written).toEqual([
+      { number: 1, state: "pending", description: PENDING },
+    ]);
+  });
+
+  it("clears an inherited marker once, not every sweep", async () => {
+    // The other half of the clear above: having rewritten the head to
+    // PENDING, the next sweep must find nothing to do. It does, and by two
+    // independent routes -- the sticky read no longer fires, and the write
+    // just made is this arrival's own age anchor, so the head is young and
+    // never reaches the clearing path at all. Without both, clearing the
+    // wording would trade one false instruction for a status rewritten
+    // every sweep, which is what walks a gate marker forward.
+    const again = await sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: { abc1234: [
+          gate("2026-08-14T12:30:30Z"),
+          gate("2026-08-14T11:00:00Z", "pending", UNANSWERED),
+        ] },
+        checkSuites: { abc1234: [bornSuite("2026-08-14T12:30:00Z")] },
+        graphqlResponses: [repoPRs([prNode()])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
+    });
+    expect(again.awaiting).toBe(1);
+    expect(again.written).toEqual([]);
+  });
+
+  it("says the unanswered head is unanswered exactly once", async () => {
+    // The age is anchored partly on our own last status write, so a naive
+    // escalation resets that anchor: the next sweep finds the head young,
+    // rewrites PENDING, and the two alternate forever -- rewriting the
+    // head's status every sweep, which is what walks its gate marker
+    // forward until no reaction can outrank it. Sticky instead: read back
+    // off the head, and once said, say nothing more.
+    const parked = await sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: { abc1234: [gate("2026-08-14T12:00:00Z", "pending", UNANSWERED)] },
+        graphqlResponses: [repoPRs([prNode()])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
+    });
     expect(parked.awaiting).toBe(0);
     expect(parked.written).toEqual([]);
   });
@@ -1905,6 +2281,73 @@ describe("sweep", () => {
     });
     expect((await at("2026-08-14T12:35:00Z")).awaiting).toBe(1);
     expect((await at("2026-08-14T12:41:00Z")).awaiting).toBe(0);
+  });
+
+  it("keeps a timed-out nudge parked instead of alternating with it", async () => {
+    // Codex, PR #37. `nudged` sits ABOVE `unanswered` in `verdictFor`, and
+    // an old nudge stays `nudged` forever while nothing answers -- so the
+    // sweep after the park rewrote PENDING over the marker, re-anchored the
+    // window on that change, and the head alternated between the two every
+    // UNANSWERED_MINUTES, restarting polling each time. The test above
+    // stops at the first timeout and never saw the sweep that follows it.
+    //
+    // The marker IS the record that this head waited out a full window with
+    // nothing arriving, and the ask it waited on is the nudge -- so a nudge
+    // OLDER than the marker is already accounted for, and only a newer one
+    // is a fresh ask.
+    const after = (statuses, comments) => sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: { abc1234: statuses },
+        issueComments: { 1: comments },
+        graphqlResponses: [repoPRs([prNode()])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T12:45:00Z"),
+    });
+    const nudge = (at) => [{ user: { login: OWNER }, created_at: at, body: "@codex review" }];
+    const parked = [
+      gate("2026-08-14T12:40:00Z", "pending", UNANSWERED),
+      gate("2026-08-14T12:00:00Z"),
+    ];
+    // The marker postdates the nudge, so it stands and nothing is written.
+    const held = await after(parked, nudge("2026-08-14T12:10:00Z"));
+    expect(held.awaiting).toBe(0);
+    expect(held.written).toEqual([]);
+    // A nudge NEWER than the marker is a fresh ask: the wait reopens and the
+    // head goes back on the clock, exactly as it would without a marker.
+    const asked = await after(parked, nudge("2026-08-14T12:44:00Z"));
+    expect(asked.awaiting).toBe(1);
+    expect(asked.written).toEqual([
+      { number: 1, state: "pending", description: PENDING },
+    ]);
+  });
+
+  it("reopens the wait for a newer nudge that has itself aged out", async () => {
+    // The case that separates "the marker outranks an older nudge" from
+    // "the marker outranks every nudge". Inside the window the clear on the
+    // still-polling path masks the difference -- it rewrites PENDING either
+    // way -- so only a nudge that is both NEWER than the marker and already
+    // past UNANSWERED_MINUTES shows it: absorb it and a fresh ask is
+    // silently swallowed by a stale marker, never putting the head back on
+    // the clock at all.
+    const asked = await sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: { abc1234: [
+          gate("2026-08-14T12:40:00Z", "pending", UNANSWERED),
+          gate("2026-08-14T12:00:00Z"),
+        ] },
+        issueComments: { 1: [
+          { user: { login: OWNER }, created_at: "2026-08-14T12:44:00Z", body: "@codex review" },
+        ] },
+        graphqlResponses: [repoPRs([prNode()])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T13:20:00Z"),
+    });
+    expect(asked.awaiting).toBe(1);
+    expect(asked.written).toEqual([
+      { number: 1, state: "pending", description: PENDING },
+    ]);
   });
 
   it("gives a just-gated head the full window whatever its records say", async () => {
