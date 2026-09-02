@@ -100,6 +100,69 @@ export const FINDINGS = "Codex left findings on this head";
 export const UNREADABLE = "Verdict unreadable — failing closed until the sweep recovers";
 
 /**
+ * The pending description for a head Codex never answered.
+ *
+ * Parking an unanswered head is not new -- see `UNANSWERED_MINUTES` -- but
+ * it used to park SILENTLY, leaving `PENDING` standing. That reads exactly
+ * like a review still in flight, so the one state a person has to act on
+ * was indistinguishable from the ordinary wait, and the documented remedy
+ * (comment `@codex review`, once) had to be arrived at by hand.
+ *
+ * So the park says so instead. It costs nothing: the sweep already holds
+ * `statuses: write` and is already this head's writer, so no new
+ * permission, call or comment is involved -- only different words in a
+ * place the pull request already shows.
+ *
+ * STICKY, because the age it is derived from is anchored partly on our own
+ * last status write: escalating would otherwise reset that anchor, the next
+ * sweep would find the head young again and rewrite `PENDING`, and the two
+ * would alternate forever -- walking the head's gate marker forward every
+ * sweep. Once written it stands until something real happens: a nudge
+ * (which outranks it in `verdictFor`), a push (a new head with its own
+ * status), or Codex finally answering.
+ */
+export const UNANSWERED = "Codex has not answered this head — comment @codex review";
+
+/**
+ * The same park on a head whose REACTION cannot be accepted.
+ *
+ * `checkSuiteBirths` dates a head's arrival from a suite born on its
+ * branch, and GitHub reports no `head_branch` for a fork's suites — so a
+ * fork head is undatable FOREVER, and `judge` refuses its 👍 by design
+ * rather than fall back to a bound an attacker could pre-stamp.
+ *
+ * Only the reaction, though, and the distinction is the whole wording.
+ * `cleanlyApproved` is `approvedIsLatest || cleanIsLatest`, and the second
+ * disjunct never consults the suites: an attributable clean COMMENT names
+ * the commit it read, which is exactly what the reaction lacks, so it
+ * approves a fork head like any other. A re-review can therefore settle
+ * this head — it just cannot be settled by a 👍 alone. Saying otherwise
+ * sends a maintainer to an admin override past a remedy that works, so the
+ * sentence keeps both: the retry first, the override as the fallback.
+ */
+export const UNANSWERED_FORK =
+  "A fork head\u0027s 👍 cannot be accepted — comment @codex review, or merge by admin override";
+
+/**
+ * Every wording this loop parks a head with.
+ *
+ * Read as a set rather than compared one at a time, because all three
+ * places that care — the sticky read, the age anchor, and the clear — mean
+ * "a marker we wrote when we gave up", not any particular sentence.
+ */
+const PARKED = new Set([UNANSWERED, UNANSWERED_FORK]);
+
+/**
+ * Which park wording is true for this head.
+ *
+ * Derived from the pull request, never from what the commit already wears:
+ * a status belongs to the commit, so the same SHA can be a same-repo head
+ * in one pull request's life and a fork head in the next, and only one of
+ * the two remedies works at a time.
+ */
+const marker = (node) => (node.isCrossRepository ? UNANSWERED_FORK : UNANSWERED);
+
+/**
  * Consecutive failing sweeps before a head's failure stops being treated as
  * transient: minutes past any replication lag, still short enough that a
  * stale published verdict is invalidated and the owner notified promptly.
@@ -576,7 +639,7 @@ export async function codexCommentSignals(api, { owner, name, number, since, hea
  * Returns null for a draft — nothing to gate until it is ready for review.
  */
 export function verdictFor({
-  isDraft, approved, sharedHead, held, reading, findings, nudged,
+  isDraft, approved, sharedHead, held, reading, findings, nudged, unanswered,
 }) {
   if (isDraft) return null;
 
@@ -623,6 +686,11 @@ export function verdictFor({
   // order here never lets a leftover reaction outrank findings that came
   // after it. Reading outranks both — a re-read is the verdict changing.
   if (findings) return { state: "pending", description: FINDINGS };
+
+  // Below findings on purpose: a head Codex left findings on HAS been
+  // answered, whatever its age. This is only for the head nothing ever came
+  // back about.
+  if (unanswered) return { state: "pending", description: unanswered };
 
   return { state: "pending", description: PENDING };
 }
@@ -1218,8 +1286,48 @@ export async function sweep({
       cleanlyApproved = approvedIsLatest || cleanIsLatest;
       findings = !cleanlyApproved && Boolean(answeredAt) && !nudged;
     }
+    // A marker is OUR record that this head waited out a full window with
+    // nothing arriving -- and the ask it waited on is the nudge, so a nudge
+    // OLDER than the marker is already accounted for by that wait. Only a
+    // NEWER one is a fresh ask. Without this the head alternates: `nudged`
+    // outranks `unanswered` in `verdictFor`, an unanswered nudge stays
+    // `nudged` forever, so the sweep after the park rewrites PENDING,
+    // re-anchors the window on that change, and the two swap every
+    // UNANSWERED_MINUTES -- restarting polling each time and walking the
+    // gate marker forward, which is what the stickiness exists to prevent.
+    //
+    // Read the NEWEST status only, deliberately. A transient override — a
+    // shared head, a hold, UNREADABLE — displaces the marker, and reading
+    // past it to restore the park is wrong for a reason that took three
+    // rounds to surface: a status belongs to the COMMIT, so the marker
+    // underneath may be a different pull request's, and on a shared head
+    // that override is the only status dating THIS one's life. Restoring
+    // there parks a brand-new pull request on sight. Telling the two apart
+    // needs a park scoped to the pull request rather than the commit — the
+    // arrival-dating gap tracked in TODO.md. Until that exists an override
+    // costs the marker one window, which is the behavior before this change
+    // and the cheaper of the two wrongs.
+    const parkedAt = PARKED.has(mine[0]?.description) ? utc(mine[0].created_at) : null;
+    const parkStands = parkedAt !== null && (nudgeAt === null || parkedAt > nudgeAt);
     const verdict = verdictFor({
-      isDraft: false, approved: cleanlyApproved, sharedHead, held, reading, findings, nudged,
+      isDraft: false, approved: cleanlyApproved, sharedHead, held, reading,
+      findings, nudged: nudged && !parkStands,
+      // Read back off the head rather than recomputed: see UNANSWERED for
+      // why this has to be sticky. Everything that should clear it -- a
+      // nudge, a push, an answer -- outranks it in `verdictFor` or arrives
+      // as a different head with its own status.
+      // Sticky in that we PARKED, not in what we said: the marker is a
+      // function of this head's topology, so it is recomputed rather than
+      // replayed. A commit carries its statuses, so one parked in a
+      // same-repo pull request and later reused as a fork head would
+      // otherwise inherit `@codex review` -- the instruction that cannot
+      // work there -- without the escalation, which is topology-aware,
+      // ever running again. Correcting it writes once and then stands:
+      // the age anchor skips every marker, so nothing re-arms the window.
+      // `parkStands` rather than a bare `PARKED.has`, though the two cannot
+      // be told apart from outside: where they differ the nudge is newer,
+      // and `nudged` then outranks this anyway. Same concept, named once.
+      unanswered: parkStands ? marker(node) : null,
     });
     const changed = await publish(api, { owner, name, pr: node, verdict, current: mine[0], log });
     if (changed) written.push({ number: node.number, ...verdict });
@@ -1274,11 +1382,65 @@ export async function sweep({
     // identical-write skip in `publish` means nothing refreshes the anchor
     // while the state stands still, so the window cannot self-extend.
     if (changed) return 1;
-    let waitedSince = laterOf(bound, nudgeAt, utc(mine[0]?.created_at));
-    if (!waitedSince) return 1;
+    // The anchor is our last status write that MOVED the state, which an
+    // escalation is not: it reports the wait rather than restarting it.
+    // Counting it would reset the window the moment we gave up, and the
+    // head would poll another full one -- and skipping the whole age path
+    // instead (an early return on the escalated description) is worse: a
+    // commit carries its statuses, so one reused as another pull request's
+    // head, or fast-forwarded back onto a branch, arrives already wearing
+    // this marker and would park on its first sweep, before Codex's pickup
+    // window even opens. That is exactly what the branch-born-suite
+    // re-anchor below exists to stop, so the path has to reach it.
+    // Polling and the marker are complements: UNANSWERED means this loop
+    // gave up, so EVERY path that keeps the clock running has to take it
+    // back. A clear on only one of them is not cosmetic -- the head goes on
+    // telling the maintainer to nudge a review that is running normally.
+    // The shape that found this: `bound` includes `movedAt`, so a
+    // force-push away and back onto an already-parked commit makes the
+    // window fresh at the FIRST age check, above the branch-born re-anchor
+    // where the clear originally lived alone.
+    //
+    // Guarded on the wording, because a comment-only finding reaches this
+    // path too (the FINDINGS fast-exit needs `reviewedAt`, which a bare
+    // comment has none of) and its accurate word must not be reopened.
+    const stillPolling = async () => {
+      if (PARKED.has(verdict.description)) {
+        const fresh = { state: "pending", description: PENDING };
+        if (await publish(api, { owner, name, pr: node, verdict: fresh, current: mine[0], log })) {
+          written.push({ number: node.number, ...fresh });
+        }
+      }
+      return 1;
+    };
+    const anchoring = mine.find((s) => !PARKED.has(s.description));
+    let waitedSince = laterOf(bound, nudgeAt, utc(anchoring?.created_at));
+    if (!waitedSince) return stillPolling();
     let ms = Date.parse(waitedSince);
-    if (Number.isNaN(ms)) return 1;
-    if (now() - ms < UNANSWERED_MINUTES * 60_000) return 1;
+    if (Number.isNaN(ms)) return stillPolling();
+    if (now() - ms < UNANSWERED_MINUTES * 60_000) return stillPolling();
+    // The park now SAYS the head is unanswered rather than leaving
+    // `PENDING` standing, so the one state that needs a person is not
+    // spelled the same as the ordinary wait. Same status, same permission,
+    // different words.
+    const escalate = async () => {
+      // Only the ordinary wait gets renamed. A comment-only finding -- one
+      // Codex left without submitting a review -- is why: the FINDINGS
+      // fast-exit above needs `reviewedAt`, so that head reaches here still
+      // described as FINDINGS, and saying it was never answered would be
+      // false. It would also not STAY said: `findings` outranks `unanswered`
+      // in `verdictFor`, so the next sweep writes FINDINGS back, that change
+      // re-anchors the age, and the head flaps between the two every
+      // UNANSWERED_MINUTES forever -- walking its gate marker forward each
+      // time, which is exactly what the stickiness exists to prevent. Park it
+      // as before, keeping the truer word.
+      if (verdict.description !== PENDING) return 0;
+      const said = { state: "pending", description: marker(node) };
+      if (await publish(api, { owner, name, pr: node, verdict: said, current: mine[0], log })) {
+        written.push({ number: node.number, ...said });
+      }
+      return 0;
+    };
     // Looks expired — but a fast-forward can land a head already carrying
     // an identical old PENDING from a previous life, and then nothing
     // above refreshed the anchor: no reaction means the suites were never
@@ -1293,7 +1455,13 @@ export async function sweep({
     }
     waitedSince = laterOf(waitedSince, births?.forBranch);
     ms = Date.parse(waitedSince);
-    return now() - ms >= UNANSWERED_MINUTES * 60_000 ? 0 : 1;
+    // The re-anchor proved the arrival fresh after all, so this is a
+    // polling path like the ones above and clears the marker the same way.
+    // It cannot flap: the head then reads PENDING, the sticky read stops
+    // firing, and the write becomes this arrival's own anchor -- which is
+    // what every fresh head gets anyway.
+    if (now() - ms < UNANSWERED_MINUTES * 60_000) return stillPolling();
+    return escalate();
   }
 
   for (const node of open) {
