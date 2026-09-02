@@ -2,7 +2,7 @@
 # Runs THIS revision's check_consumer.py against every consuming repository.
 #
 # The point is what it validates and when. `templates/` and `check_consumer.py`
-# are what nine repositories are held to, and consumers track `@main`, so a
+# are what every repository below is held to, and consumers track `@main`, so a
 # merge here reaches every one of their merge gates with no release step in
 # between -- this suite is the only thing in front of that. Without this job a
 # template change is tested only against this repository's own copy, and the
@@ -11,8 +11,10 @@
 # It deliberately clones and checks the consumers rather than trusting them to
 # check themselves: a consumer runs the check at `@main`, which is the released
 # checker against its own tree, and that answers a different question from
-# "does the change under review still accept the nine repositories as they are
-# today".
+# "does the change under review still accept the consumers as they are today".
+# The count is deliberately not written out here: it moved from three to nine
+# to twenty-one, and a number in prose goes stale silently -- CONSUMERS below
+# is the one place that says how many.
 #
 # The list is every consumer THIS REPOSITORY KNOWS OF, which is not the same as
 # every consumer and must not be mistaken for it. This action is public and
@@ -51,7 +53,7 @@ set -eu
 # the clone below supplies the owner, so this list cannot express an outside
 # adopter -- deliberately, since it is the siblings this repository is
 # responsible for checking, not a registry of everyone using the action.
-CONSUMERS="scripts vcs conf unixtools root mesh web gedmap lanes readmo newshacker npm-update rust-update gradle-update snoozemo clothescast typelauncher ci-commit-artifact yaml-lite androidlog"
+CONSUMERS="scripts vcs conf unixtools root mesh web gedmap lanes readmo newshacker npm-update rust-update gradle-update snoozemo clothescast typelauncher ci-commit-artifact yaml-lite androidlog repo"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 SIBLINGS="${1:-}"
 

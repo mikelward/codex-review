@@ -67,9 +67,9 @@ has stopped biting.
 - The safe direction is the default: a broken sweep leaves `pending`, which
   blocks merges rather than letting anything through, so the worst case is
   every consumer's gate stalling until you revert.
-- Twenty sibling repositories consume this: `androidlog`,
+- Twenty-one sibling repositories consume this: `androidlog`,
   `ci-commit-artifact`, `clothescast`, `conf`, `gedmap`, `gradle-update`,
-  `lanes`, `mesh`, `newshacker`, `npm-update`, `readmo`, `root`,
+  `lanes`, `mesh`, `newshacker`, `npm-update`, `readmo`, `repo`, `root`,
   `rust-update`, `scripts`, `snoozemo`, `typelauncher`, `unixtools`, `vcs`,
   `web`, `yaml-lite`. A change to the action's inputs,
   its published wording, or `templates/` needs their workflows checked, even
