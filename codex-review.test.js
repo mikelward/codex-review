@@ -20,6 +20,7 @@ import {
   newestIn,
   input,
   cleanVerdict,
+  reviewTableStatus,
 } from "./codex-review.mjs";
 
 describe("verdictFor", () => {
@@ -490,6 +491,23 @@ const page = (nodes, hasNextPage = false, endCursor = null) => ({
 const GATED_AT = "2026-08-14T12:00:00Z";
 const AFTER = "2026-08-14T12:05:00Z";
 const BEFORE = "2026-08-14T11:00:00Z";
+
+// Codex's status-table comment, in the shape observed live on 2026-09-02:
+// a row per review kind, each naming its own commit, with the security row
+// deliberately carrying a DIFFERENT one -- that is what the per-row reading
+// has to survive.
+const summaryTable = ({ status, commit, security = "Completed", securityCommit = "0beef12" }) => [
+  "<!-- codex-pull-request-review-summary -->",
+  `<!-- codex-security-review:v1 {"headSha":"${securityCommit}","status":"completed"} -->`,
+  "## Codex Review Summary",
+  "",
+  "| Review | Status | Commit | Review trigger |",
+  "| --- | --- | --- | --- |",
+  `| 📝 **Code Review** | **${status}** <relative-time datetime="2026-09-02T14:05:12Z">t</relative-time> | \`${commit}\` | New commits |`,
+  `| 🔒 **Security Review** | **${security}** <relative-time datetime="2026-09-02T14:04:07Z">t</relative-time> | \`${securityCommit}\` | PR opened |`,
+  "",
+  "<details> <summary>About Codex in GitHub</summary> boilerplate </details>",
+].join("\n");
 // When the head commit was made — the comment walk's lower bound, always
 // earlier than the marker but later than anything about a previous head.
 const BORN_AT = "2026-08-14T11:30:00Z";
@@ -849,6 +867,53 @@ describe("sweep", () => {
     expect(out.awaiting).toBe(1);
     // Unchanged from the marker's pending, so nothing is rewritten either.
     expect(out.written).toEqual([]);
+  });
+
+  it("parks a reading head once Codex's table says it is still reading", async () => {
+    // The premise of the test above -- that the answer's arrival has no
+    // webhook -- stopped holding when Codex began maintaining a status
+    // table it EDITS to `Completed`. That edit is an `issue_comment` event,
+    // so the read no longer has to be polled through: park, and let the
+    // edit be the wake. Still `pending`, so nothing fails open.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [{
+          user: { login: `${CODEX_BOT}[bot]`, type: "Bot" },
+          created_at: BEFORE,
+          body: summaryTable({ status: "Running", commit: "abc1234" }),
+        }],
+      },
+      graphqlResponses: [repoPRs([
+        prNode({ reactions: page([hold("EYES", `${CODEX_BOT}[bot]`)]) }),
+      ])],
+    });
+    const out = await runFull(fake);
+    expect(out.awaiting).toBe(0);
+    expect(out.written).toEqual([]);
+  });
+
+  it("keeps polling a reading head whose table is about another commit", async () => {
+    // The other direction, and the one that matters: a table row naming a
+    // commit that is not this head says nothing about this head, so the
+    // clock has to keep running exactly as it did before the table
+    // existed. Observed live -- the rows disagree, carrying different
+    // commits at the same moment -- so this is the ordinary case after a
+    // push, not a contrived one.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [{
+          user: { login: `${CODEX_BOT}[bot]`, type: "Bot" },
+          created_at: BEFORE,
+          body: summaryTable({ status: "Running", commit: "0beef12" }),
+        }],
+      },
+      graphqlResponses: [repoPRs([
+        prNode({ reactions: page([hold("EYES", `${CODEX_BOT}[bot]`)]) }),
+      ])],
+    });
+    expect((await runFull(fake)).awaiting).toBe(1);
   });
 
   it("stops the clock once Codex has returned findings for the head", async () => {
@@ -2020,6 +2085,70 @@ describe("input", () => {
     // under the old code and the loop bug looked like a scheduling problem.
     expect(withEnv({ INPUT_REPOSITORY: "owner/name" },
       () => input("repository", "GITHUB_REPOSITORY"))).toBe("owner/name");
+  });
+});
+
+describe("reviewTableStatus", () => {
+  const HEAD = "b9f8d3213f5895509362ccd581b990bd0d830d3b";
+
+  it("reads the code row as running for this head", () => {
+    expect(reviewTableStatus(summaryTable({ status: "Running", commit: "b9f8d32" }), HEAD))
+      .toBe("running");
+  });
+
+  it("reads the code row as completed for this head", () => {
+    expect(reviewTableStatus(summaryTable({ status: "Completed", commit: "b9f8d32" }), HEAD))
+      .toBe("completed");
+  });
+
+  it("never answers for the code row out of the security row", () => {
+    // Observed live on a private sibling, 2026-09-02: Code Review `Running` on the new
+    // head while Security Review still read `Completed` on the commit
+    // before it. A reading that took the first row it understood, or the
+    // `codex-security-review:v1` marker's `headSha`, would report the
+    // security pass's state as the code review's -- so this asks about the
+    // commit the SECURITY row names and must still get null.
+    const body = summaryTable({
+      status: "Running", commit: "b9f8d32",
+      security: "Completed", securityCommit: "4cc14a9",
+    });
+    expect(reviewTableStatus(body, "4cc14a9cc0a7f19938a6d7d5c676a1ec98aedf69")).toBeNull();
+  });
+
+  it("refuses a comment without the marker", () => {
+    // Any comment can hold a table-shaped block; only Codex's carries the
+    // marker, and without it this is just someone's prose.
+    const body = summaryTable({ status: "Running", commit: "b9f8d32" })
+      .replace("codex-pull-request-review-summary", "something-else");
+    expect(reviewTableStatus(body, HEAD)).toBeNull();
+  });
+
+  it("compares by prefix only in the direction that cannot collide", () => {
+    // As in `cleanVerdict`: the row's abbreviated id must be a prefix of
+    // the head, never the reverse, which would let a long id speak for a
+    // head it merely starts with.
+    expect(reviewTableStatus(summaryTable({ status: "Running", commit: "b9f8d3213f5" }), "b9f8d32"))
+      .toBeNull();
+  });
+
+  it("says nothing while the table carries no code row yet", () => {
+    // Observed on this action's own pull request: the comment is CREATED
+    // with the security row alone, and the code row arrives in a later
+    // edit. A reading that took the first row it could parse would report
+    // the security pass's state as the code review's during that window.
+    const body = summaryTable({ status: "Running", commit: "7284e2e" })
+      .split("\n")
+      .filter((l) => !l.includes("Code Review"))
+      .join("\n");
+    expect(reviewTableStatus(body, "7284e2e8f880ff0a93d3549c5c852f4940d72f07")).toBeNull();
+  });
+
+  it("refuses a status word it does not know", () => {
+    // Degrading to null keeps polling, which is what the caller did before
+    // the table existed -- so a new state upstream costs runner minutes,
+    // never a wrong answer.
+    expect(reviewTableStatus(summaryTable({ status: "Queued", commit: "b9f8d32" }), HEAD))
+      .toBeNull();
   });
 });
 

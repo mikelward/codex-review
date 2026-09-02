@@ -413,6 +413,73 @@ export function commentSignals(comments, { since, owner, head }) {
  * other way round: every real incident so far has been this function
  * refusing a clean verdict, never approving a hidden finding.
  */
+/**
+ * The marker on Codex's status-table comment.
+ *
+ * Since about 2026-08-26 Codex maintains one comment per pull request
+ * carrying a row per review kind -- Code Review, Security Review -- each
+ * naming the commit it is about and reading `Running` then `Completed`.
+ * It EDITS that comment in place as each review lands, and the edit arrives
+ * as an `issue_comment` event, a trigger every consumer already declares.
+ * That is the whole value here: the end of a read finally has a webhook,
+ * where the 👍 has none.
+ */
+export const SUMMARY_MARKER = "codex-pull-request-review-summary";
+
+/**
+ * What Codex's status table says about the CODE review of this head:
+ * `"running"`, `"completed"`, or null for anything else.
+ *
+ * Null is the conservative answer everywhere, and it means "this comment
+ * tells us nothing about this head" -- the caller then behaves exactly as
+ * it did before the table existed. That is what keeps an upstream change to
+ * an undocumented comment from breaking the gate: a shape that stops
+ * matching degrades to polling rather than to a wrong answer, the same
+ * discipline `cleanVerdict` uses.
+ *
+ * It is deliberately NOT a verdict channel, and must never become one.
+ * `Completed` is silent about whether anything was FOUND, so reading it as
+ * clean would infer from absence -- and the findings review and this edit
+ * have landed inside the same second on real pull requests, so that race is
+ * not theoretical. Cleanliness stays with the 👍 and the attributable clean
+ * comment; this only says whether the answer is still being written.
+ *
+ * Per ROW, because the rows disagree: observed live with Code Review
+ * `Running` on one commit while Security Review still read `Completed` on
+ * the commit before it. The `codex-security-review:v1` JSON marker that
+ * rides in the same comment is the security row's state, not this one's,
+ * and its `headSha` goes stale the same way -- so neither the comment nor
+ * that marker has a single head, and only the row does.
+ */
+export function reviewTableStatus(body, head) {
+  const text = String(body ?? "");
+  if (!text.includes(SUMMARY_MARKER)) return null;
+  // Everything from `<details` on is Codex's boilerplate footer, dropped
+  // before the shape is read -- as in `cleanVerdict`, and for the same
+  // reason: the footer's prose is not part of what is being validated.
+  const rows = text.split(/<details/i)[0]
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("|"));
+  for (const row of rows) {
+    // `| a | b | c |` -> ["", " a ", " b ", " c ", ""], so the ends drop.
+    const cells = row.split("|").slice(1, -1).map((c) => c.trim());
+    if (cells.length < 3) continue;
+    if (!/\bCode Review\b/.test(cells[0])) continue;
+    const named = /`([0-9a-f]{7,40})`/.exec(cells[2])?.[1];
+    if (!named) return null;
+    // The abbreviation is Codex's -- seven characters here where the API
+    // gives forty -- so compare by prefix in the direction that cannot
+    // collide, exactly as `cleanVerdict` does: the named id must be a
+    // prefix of the full head, never the reverse.
+    if (!head || !String(head).toLowerCase().startsWith(named.toLowerCase())) return null;
+    if (/\*\*Running\*\*/.test(cells[1])) return "running";
+    if (/\*\*Completed\*\*/.test(cells[1])) return "completed";
+    return null;
+  }
+  return null;
+}
+
 export function cleanVerdict(body, head) {
   const text = String(body ?? "");
   // Validate the WHOLE known structure, not a list of things it must not
@@ -446,6 +513,37 @@ export function cleanVerdict(body, head) {
   // gives forty, so compare by prefix in the direction that cannot collide
   // -- the named id must be a prefix of the full head, never the reverse.
   return String(head).toLowerCase().startsWith(named.toLowerCase()) ? "head" : "other";
+}
+
+/**
+ * Codex's status table for this head's CODE review, fetched from the
+ * top-level comment stream.
+ *
+ * Its own call, and paid only on the would-park path in `sweep` -- the same
+ * shape as `checkSuiteBirths`, which is fetched only in the two cases where
+ * it can change the answer. The comment walk cannot supply this: it is
+ * skipped entirely while `reading`, which is precisely the state this is
+ * asked about, and it bounds Codex comments by `created_at` -- while the
+ * table comment is CREATED once at pull-request open and edited in place
+ * ever after, so any such bound hides it from every later head.
+ *
+ * Author-checked like every other Codex signal. This one cannot open a
+ * gate, so a forgery could only PARK the loop early -- a stall, which is
+ * fail-closed -- but the repository is public and a stranger should not be
+ * able to spend the maintainer's verdict latency either.
+ */
+export async function codeReviewTableStatus(api, { owner, name, number, head }) {
+  for (let page = 1; ; page += 1) {
+    const batch = await api.rest(
+      `/repos/${owner}/${name}/issues/${number}/comments?per_page=100&page=${page}`,
+    );
+    for (const c of batch ?? []) {
+      if (!matchesBot(c.user)) continue;
+      const status = reviewTableStatus(c.body, head);
+      if (status) return status;
+    }
+    if (!batch || batch.length < 100) return null;
+  }
 }
 
 export async function codexCommentSignals(api, { owner, name, number, since, head }) {
@@ -1126,9 +1224,35 @@ export async function sweep({
     const changed = await publish(api, { owner, name, pr: node, verdict, current: mine[0], log });
     if (changed) written.push({ number: node.number, ...verdict });
     if (verdict.state !== "pending") return 0;
-    // Eyes on means the review genuinely started; long reads are what the
-    // loop is for, so a reading head never decays off the clock.
-    if (reading) return 1;
+    // Eyes on means the review genuinely started. That used to keep a
+    // reading head on the clock unconditionally -- long reads being what
+    // the loop is for -- because the answer's arrival had no webhook: the
+    // 👍 emits nothing, so polling through the read was the only way to
+    // see it land.
+    //
+    // Codex's status table changed that premise. It says, per row and per
+    // commit, whether this head's code review is still `Running`, and it is
+    // EDITED to `Completed` when the answer arrives -- an `issue_comment`
+    // event every consumer already triggers on. So a read whose end will
+    // announce itself does not need the fast clock: park the head (still
+    // `pending` -- nothing fails open) and let that edit be the wake.
+    // Measured on a private sibling's pull request, 2026-09-02: the edit's
+    // run published the verdict seven seconds after firing, while the poll
+    // it replaced had already been cancelled in the concurrency queue.
+    //
+    // Only `running` parks. Null -- no table, an unreadable one, or a row
+    // about a different commit -- keeps the old behavior, so a shape that
+    // stops matching costs polling rather than correctness.
+    if (reading) {
+      const table = await codeReviewTableStatus(api, {
+        owner, name, number: node.number, head: node.headRefOid,
+      });
+      if (table === "running") {
+        log(`#${node.number}: Codex is still reading this head and says so — parking until it says otherwise`);
+        return 0;
+      }
+      return 1;
+    }
     if (verdict.description === FINDINGS && reviewedAt) return 0;
     // Everything else pending is a wait for an answer that arrives within
     // minutes of the event that asked for it — the push for a fresh head,
