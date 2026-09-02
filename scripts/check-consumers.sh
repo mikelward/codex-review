@@ -54,6 +54,27 @@ set -eu
 # adopter -- deliberately, since it is the siblings this repository is
 # responsible for checking, not a registry of everyone using the action.
 CONSUMERS="scripts vcs conf unixtools root mesh web gedmap lanes readmo newshacker npm-update rust-update gradle-update snoozemo clothescast typelauncher ci-commit-artifact yaml-lite androidlog repo"
+
+# Consumers this job cannot CLONE, only check. The clone below is anonymous --
+# this repository's CI has no credential for a sibling -- so a private consumer
+# is unreachable here however correctly it is set up, and naming it in the list
+# above would make this job red forever rather than checking anything. Named
+# separately instead: checked like any other when a local checkout is supplied
+# (`scripts/check-consumers.sh ../`), and a REPORTED skip when the clone fails,
+# never a silent one and never a pass.
+#
+# What that costs is real and worth saying plainly: a templates/ change is not
+# validated against these repositories before it merges. Their own
+# codex-review-check.yml still holds them to the pin -- that is the drift
+# protection, and it is unaffected -- but it runs at `@main`, so a template
+# change reaches them first and their next pull request is where it goes red.
+# Piloting a templates/ change against a local checkout of one of these, per
+# AGENTS.md, is what closes that.
+#
+# A clone that unexpectedly SUCCEEDS is checked exactly like a public consumer,
+# so this degrades in the useful direction if one is ever opened up or this job
+# is ever given a credential.
+PRIVATE_CONSUMERS="simmo"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 SIBLINGS="${1:-}"
 
@@ -69,8 +90,16 @@ skipped=""
 # let an unrelated active migration keep a finished one's shape alive.
 matched="$WORK/matched"
 : > "$matched"
+# The consumers this run actually READ -- every one of them, not just the
+# private ones. Recorded positively, at the point a check completes, rather
+# than at each skip: there are three ways to miss one (unreachable, absent from
+# a sibling directory, present but not yet adopted) and a list built from the
+# skips goes wrong by forgetting a new one, which fails in the dangerous
+# direction below.
+checked_names="$WORK/checked_names"
+: > "$checked_names"
 
-for name in $CONSUMERS; do
+for name in $CONSUMERS $PRIVATE_CONSUMERS; do
     if test -n "$SIBLINGS"; then
         repo="$SIBLINGS/$name"
         test -d "$repo" || { skipped="$skipped $name(absent)"; continue; }
@@ -79,6 +108,16 @@ for name in $CONSUMERS; do
         # Shallow, single branch: this needs the default branch's tree and
         # nothing of its history.
         if ! git clone --quiet --depth 1 "https://github.com/mikelward/$name" "$repo" 2>"$WORK/err"; then
+            # Expected for a private consumer and only for one: anything in
+            # CONSUMERS that cannot be cloned is the failure this branch is
+            # for -- a rename, a revoked clone, a repository that has gone
+            # away -- and must not be quietly downgraded to a skip.
+            case " $PRIVATE_CONSUMERS " in
+                *" $name "*)
+                    skipped="$skipped $name(private, unreachable)"
+                    continue
+                    ;;
+            esac
             echo "FAIL: could not clone $name"
             sed 's/^/    /' "$WORK/err"
             failed=1
@@ -99,9 +138,21 @@ for name in $CONSUMERS; do
         continue
     fi
 
-    checked=$((checked + 1))
     echo "== $name"
-    if ! python3 "$HERE/check_consumer.py" "$repo" > "$WORK/out"; then
+    # Counted as read only once the checker reaches a VERDICT, not merely
+    # because it was invoked. A non-zero exit is either a crash (an unrelated
+    # workflow with non-UTF-8 bytes raises UnicodeDecodeError, for one) or a
+    # consumer matching no offered shape at all, and in neither case has this
+    # run established that the consumer left a PARTICULAR shape -- which is the
+    # only thing the guard below reads this list for. Recording it before the
+    # call left a crashed consumer looking read while contributing no notice,
+    # so its live shape looked abandoned and the guard would have said to
+    # delete it. The run is red either way; being red and also wrong is what
+    # this avoids.
+    if python3 "$HERE/check_consumer.py" "$repo" > "$WORK/out"; then
+        checked=$((checked + 1))
+        printf '%s\n' "$name" >> "$checked_names"
+    else
         failed=1
     fi
     cat "$WORK/out"
@@ -139,14 +190,30 @@ fi
 # Judged PER LABEL, since two migrations can be in flight at once: a shared
 # counter would report "some consumer is still on some old shape" and let a
 # finished shape live on behind an unrelated one that has only just started.
-# A label fires only when it is offered, at least one consumer was actually
-# checked, and NONE of them matched THAT label -- so it stays quiet for the
+# A label FAILS only when it is offered, every consumer was read, and none of
+# them matched THAT label -- so it stays quiet for the
 # whole of a real migration, including the moment it starts, when every
 # consumer still matches. A static "the directory must not exist" assertion
 # cannot do this: it would go red on the very commit that opens a migration,
 # which is the deadlock templates/superseded/ exists to remove.
+# Which consumers this run could not read, from BOTH lists. An unread consumer
+# means UNKNOWN, not gone -- and the difference decides the guard below. The
+# private one is the case that put this here, since the cloning run can never
+# read it; a public one is unread just as easily, by being absent from the
+# sibling directory a local run was pointed at or by not having adopted the
+# caller yet, and says exactly as little about which shape it is on.
+unread=""
+for name in $CONSUMERS $PRIVATE_CONSUMERS; do
+    grep -qxF -e "$name" "$checked_names" || unread="$unread $name"
+done
+
+# There is no "at least one consumer was checked" precondition, deliberately.
+# The unread list above subsumes it -- a run that checked nobody has everybody
+# unread, so it cannot reach the failing branch anyway -- and requiring one
+# ALSO skipped this block entirely, which suppressed the notice in precisely
+# the run that knew least and had the most worth saying.
 superseded="$HERE/templates/superseded"
-if test -d "$superseded" && test "$checked" -gt 0; then
+if test -d "$superseded"; then
     # Ask the checker which labels it OFFERS rather than globbing them here.
     # Two enumerations of the same directory disagree at the edges -- a shell
     # `*/` skips a dot-prefixed name that Python's iterdir() returns -- and a
@@ -177,13 +244,43 @@ for label in check_consumer.superseded_shapes():
 
     if test -s "$WORK/finished"; then
         echo
-        echo "FAIL: no checked consumer is on these superseded shapes any more,"
-        echo "      but they are still offered:"
-        sed 's/^/        /' "$WORK/finished"
-        echo "      Those migrations are over. Delete their directories under"
-        echo "      templates/superseded/ -- leaving one means the pin accepts"
-        echo "      more than one shape indefinitely."
-        failed=1
+        # A consumer this run could not read is not a consumer that has left
+        # the shape, and treating it as one instructs the exact breakage the
+        # guard exists to prevent: deleting a shape a consumer is still on
+        # turns its own check red.
+        #
+        # The private consumer is why this is here and is the LIKELY case, not
+        # a corner -- simmo goes last in any fleet-wide migration by policy, so
+        # "every public consumer has moved and the private one has not" is
+        # precisely how a migration's final step looks, and the cloning run can
+        # never read it. But the question is about being unread, not about
+        # being private: a public consumer absent from the sibling directory a
+        # local run was pointed at, or one that has not adopted the caller yet,
+        # says exactly as little about which shape it is on. Both count.
+        #
+        # So the verdict downgrades to a notice, and stays loud rather than
+        # silent: the labels are still named, and so is every consumer that was
+        # not read -- which is the list to go and make readable. Only a run
+        # that read them all fails, because that is the only run holding the
+        # information to fail on.
+        if test -n "$unread"; then
+            echo "notice: no CHECKED consumer is on these superseded shapes,"
+            echo "        but this run could not read every consumer:"
+            sed 's/^/            /' "$WORK/finished"
+            echo "        unread:$unread"
+            echo "        Unread is not gone. Settle it with a run that reads"
+            echo "        every consumer -- scripts/check-consumers.sh ../ over"
+            echo "        a directory holding all of them -- and delete only"
+            echo "        what THAT run calls finished."
+        else
+            echo "FAIL: no checked consumer is on these superseded shapes any more,"
+            echo "      but they are still offered:"
+            sed 's/^/        /' "$WORK/finished"
+            echo "      Those migrations are over. Delete their directories under"
+            echo "      templates/superseded/ -- leaving one means the pin accepts"
+            echo "      more than one shape indefinitely."
+            failed=1
+        fi
     fi
 fi
 

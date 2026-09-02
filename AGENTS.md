@@ -67,26 +67,33 @@ has stopped biting.
 - The safe direction is the default: a broken sweep leaves `pending`, which
   blocks merges rather than letting anything through, so the worst case is
   every consumer's gate stalling until you revert.
-- Twenty-one sibling repositories consume this: `androidlog`,
+- Twenty-two sibling repositories consume this: `androidlog`,
   `ci-commit-artifact`, `clothescast`, `conf`, `gedmap`, `gradle-update`,
   `lanes`, `mesh`, `newshacker`, `npm-update`, `readmo`, `repo`, `root`,
-  `rust-update`, `scripts`, `snoozemo`, `typelauncher`, `unixtools`, `vcs`,
-  `web`, `yaml-lite`. A change to the action's inputs,
+  `rust-update`, `scripts`, `simmo`, `snoozemo`, `typelauncher`, `unixtools`,
+  `vcs`, `web`, `yaml-lite`. A change to the action's inputs,
   its published wording, or `templates/` needs their workflows checked, even
   though none of them has to be edited for an ordinary fix.
-- **`simmo` is a sibling, not a consumer, and that is deliberate.** It runs
-  the sweep and listener but keeps a no-schedule `codex-review.yml` that
-  diverges from `templates/` on purpose: it's a private repo, so the canonical
-  cron bills real Actions minutes — an idle fire is a rounded-up minute — and
-  it has chosen not to pay that yet. That same billing makes it the **last** repository in any
-  fleet-wide migration: every other sibling's CI is free, so simmo is where a
-  change is confirmed, never where it is tried. `check_consumer.py`'s byte-for-byte pin
-  can't accommodate the divergence, so it isn't in `CONSUMERS` and never
-  adopted `codex-review-check.yml`. The trade-off (accept the cost and
-  enroll, or keep the customization permanently) is recorded in `simmo`'s own
-  `TODO.md` under "Decisions needing review" — not this repository's problem
-  to solve, though the four-hourly cadence is what makes the cost side of it
-  ~180 minutes a month rather than ~720.
+- **`simmo` is a consumer this job can check but cannot CLONE.** It enrolled
+  on 2026-09-02, giving up the no-schedule `codex-review.yml` it had
+  hand-maintained until then — a divergence nothing compared to anything,
+  which is how it had also silently lost the retarget trigger. What made the
+  cost bearable was the backstop moving from hourly to four-hourly: ~180
+  billed minutes a month rather than ~720, since it is the one private
+  repository here and every idle fire is a rounded-up minute.
+  It is therefore in `PRIVATE_CONSUMERS`, not `CONSUMERS`:
+  `check-consumers.sh` clones anonymously, so naming it in the public list
+  would make this repository's own CI red forever rather than checking
+  anything. The consequence is worth stating rather than filing away — **a
+  `templates/` change is not validated against simmo before it merges.**
+  simmo's own `codex-review-check.yml` still holds it to the pin, which is
+  the drift protection and is unaffected, but that runs at `@main`: a template
+  change reaches simmo first, and simmo's next pull request is where it goes
+  red. Piloting against a local checkout (`scripts/check-consumers.sh ../`
+  does check it) is what closes that.
+  Its billing also still makes it the **last** repository in any fleet-wide
+  migration: every other sibling's CI is free, so simmo is where a change is
+  confirmed, never where it is tried.
 - **Changing a `templates/` file is a migration, and it has a mechanism —
   use it.** The pin is byte for byte against `@main`, so an edited template
   mismatches every consumer the instant it merges, while `check-consumers.sh`
@@ -96,7 +103,16 @@ has stopped biting.
   outgoing files there in the same commit that changes the template, and
   nothing goes red. Consumers then migrate one at a time, each reported by a
   `notice:` line until it moves, and **deleting that label's directory is what
-  ends the migration** — leave it and the pin quietly accepts two shapes forever. Only
+  ends the migration** — leave it and the pin quietly accepts two shapes forever.
+  **The run that says a migration is over has to be one that read every
+  consumer, and the CI run never is.** simmo goes last by policy and cannot be
+  cloned there, so "every public consumer has moved" is how a migration's final
+  step looks whether or not simmo has moved too. Being unread is the test, not
+  being private: a local run pointed at a directory missing a sibling, or one
+  that has not adopted the caller, is equally blind. So the sweep downgrades
+  its verdict to a `notice:` listing every consumer it could not read, and only
+  a run that read them all fails. Delete a directory on the strength of a run
+  whose `unread:` list is empty, never a notice. Only
   ever offer a shape this repository actually shipped; the set is exact
   matches, not a relaxation. A label holds **all three files**, not just the
   one that changed, and is matched whole — storing only the delta would accept
