@@ -296,8 +296,13 @@ describe("action.yml", () => {
     const agents = readFileSync("AGENTS.md", "utf8");
     const sweep = readFileSync("scripts/check-consumers.sh", "utf8");
 
+    // `[\w-]+`, not `\w+`: past twenty the count word is hyphenated, and
+    // `\w+` matched only the tail of it -- "one" out of "Twenty-one" -- which
+    // NUMBER_WORDS then failed to recognize. The hyphen widens what is
+    // CAPTURED, not what is accepted: an unrecognized word is still a loud
+    // failure below, so the closed set remains the gate.
     const heading = agents.match(
-      /(\w+) sibling repositories consume this:([\s\S]*?)\. A change/,
+      /([\w-]+) sibling repositories consume this:([\s\S]*?)\. A change/,
     );
     const countWord = heading?.[1];
     const named = heading?.[2]
@@ -320,16 +325,18 @@ describe("action.yml", () => {
       eighteen: 18,
       nineteen: 19,
       twenty: 20,
+      "twenty-one": 21,
+      "twenty-two": 22,
     };
 
     // Both regexes before either comparison: a set difference against an empty
     // set is empty, so a reindented AGENTS.md bullet or a requoted CONSUMERS
     // line would turn the assertion below green while checking nothing.
-    expect(named?.length).toBe(20);
-    expect(listed?.length).toBe(20);
+    expect(named?.length).toBe(21);
+    expect(listed?.length).toBe(21);
     expect([...named].sort()).toEqual([...listed].sort());
     // The count WORD is asserted against the parsed names too, not just
-    // pinned to 20 -- otherwise a future enrollment that updates the names
+    // pinned to a literal -- otherwise a future enrollment that updates the names
     // and CONSUMERS but leaves the prose reading "Twenty" would pass here
     // while AGENTS.md quietly published a stale count.
     expect(NUMBER_WORDS[countWord?.toLowerCase()]).toBe(named?.length);
