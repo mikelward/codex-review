@@ -61,6 +61,8 @@
 // null for a draft so nothing here fights you. The reaction is for "don't
 // merge this yet", which is the ordinary case; the draft is for "stop".
 
+import { createSign } from "node:crypto";
+
 export const CODEX_BOT = "chatgpt-codex-connector";
 export const CONTEXT = "codex";
 
@@ -746,6 +748,185 @@ query($owner:String!, $name:String!, $number:Int!, $after:String!) {
   }
 }`;
 
+// --- Authenticating as a GitHub App ------------------------------------------
+
+/**
+ * The sweep's own credential, when a consumer gives it one.
+ *
+ * Publishing the `codex` status with the workflow's `GITHUB_TOKEN` means the
+ * status is posted by `github-actions[bot]` -- the identity EVERY workflow in
+ * the repository holds, so branch protection cannot bind the required check to
+ * one writer, and any workflow with `statuses: write` can forge the verdict
+ * this action exists to make trustworthy. `boundAppsFromRules` already refuses
+ * to trust a carried claim for exactly that reason; the same reasoning applies
+ * to the status this file writes.
+ *
+ * Given `app-id` and `app-private-key`, the sweep authenticates as that App
+ * instead, and the ruleset can then bind `codex` to it. The exchange is
+ * GitHub's own long-stable flow -- sign a short-lived App JWT, look up this
+ * repository's installation, mint a token from it -- and is the same one
+ * mikelward/lanes performs for the `lanes` status. Minted per run and never
+ * stored: an installation token expires in an hour, so a stored one would
+ * leave every later run unable to publish.
+ *
+ * Done here rather than by a token-minting step in the caller's workflow so a
+ * consumer's workflow stays what this repository's own rule asks of it -- no
+ * dependencies, nothing to pin, the file it runs reviewable by reading it.
+ */
+function base64url(bufferOrString) {
+  const buf = Buffer.isBuffer(bufferOrString) ? bufferOrString : Buffer.from(bufferOrString);
+  return buf.toString("base64url");
+}
+
+function defaultSign(signingInput, privateKeyPem) {
+  return createSign("RSA-SHA256").update(signingInput).sign(privateKeyPem);
+}
+
+/**
+ * A short-lived JWT identifying the App itself, not an installation.
+ *
+ * `iat` is backdated 60s for drift between this runner's clock and GitHub's --
+ * an `iat` GitHub reads as still in the future is rejected outright. `exp` is
+ * 10 minutes, GitHub's own maximum for an App JWT, and this loop can run for
+ * an hour: the token is minted once per run, before the sweep, and the JWT
+ * itself is discarded immediately.
+ */
+export function signAppJwt(appId, privateKeyPem, now = Math.floor(Date.now() / 1000), sign = defaultSign) {
+  const header = { alg: "RS256", typ: "JWT" };
+  const payload = { iat: now - 60, exp: now + 600, iss: String(appId) };
+  const signingInput = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(payload))}`;
+  return `${signingInput}.${base64url(sign(signingInput, privateKeyPem))}`;
+}
+
+async function appApi(path, appJwt, fetchImpl, { method = "GET" } = {}) {
+  const res = await fetchImpl(`https://api.github.com${path}`, {
+    method,
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${appJwt}`,
+      "x-github-api-version": "2022-11-28",
+    },
+  });
+  // The status and the call, never the JWT or the body -- the same rule
+  // `createApi` follows.
+  if (!res.ok) return { ok: false, status: res.status };
+  return { ok: true, body: await res.json() };
+}
+
+/**
+ * A token scoped to this App's installation on `repo`, and the login its
+ * writes appear under -- or a thrown error
+ * naming which half of the exchange failed. Never falls back to the
+ * workflow's own token: a consumer that supplied a credential expects the
+ * status to be posted by the App, and quietly posting it as
+ * `github-actions[bot]` would leave a bound ruleset waiting for a check
+ * nothing reports.
+ *
+ * The login comes from the installation lookup's `app_slug`, which is how
+ * GitHub names the App's bot account (`<slug>[bot]`) on everything it
+ * writes. It is read here rather than inferred later because this is the
+ * only call that knows WHICH App the configured credential is, and the
+ * rewrite below has to compare against that one exactly. A response with no
+ * slug is a refusal for the same reason a failed lookup is: with the App
+ * unnamed, an existing status can be neither trusted nor rewritten -- the
+ * first leaves a bound ruleset blocked forever, the second rewrites every
+ * head on every sweep and walks the earliest-gated marker forward with it.
+ */
+export async function appToken({ appId, privateKey, repo }, fetchImpl = fetch, sign = defaultSign) {
+  const jwt = signAppJwt(appId, privateKey, undefined, sign);
+  const found = await appApi(`/repos/${repo}/installation`, jwt, fetchImpl);
+  if (!found.ok) {
+    throw new Error(
+      `could not find this App's installation on ${repo} (${found.status}) — is it installed there?`,
+    );
+  }
+  const slug = found.body?.app_slug;
+  if (typeof slug !== "string" || slug === "") {
+    throw new Error(
+      `the installation on ${repo} named no app_slug — without it this cannot tell `
+      + "the App's own status writes from another App's, and would either leave a "
+      + "stale one standing or rewrite every head on every sweep",
+    );
+  }
+  const minted = await appApi(
+    `/app/installations/${found.body.id}/access_tokens`,
+    jwt,
+    fetchImpl,
+    { method: "POST" },
+  );
+  if (!minted.ok) {
+    throw new Error(
+      `could not mint an installation token (${minted.status}) — the App credential may be wrong or revoked`,
+    );
+  }
+  return { token: minted.body.token, login: `${slug}[bot]` };
+}
+
+/**
+ * The credential the STATUS is written with -- its token and the login the
+ * write will appear under -- or null to write it with the workflow's own.
+ *
+ * Only the write changes identity. Every read the sweep makes -- the open
+ * pull requests, their reviews and comments, check suites, the base
+ * branch's rules -- stays on the workflow's `GITHUB_TOKEN`, which already
+ * has exactly those permissions. The App the README asks for holds commit
+ * statuses and nothing else, so routing the reads through it would fail the
+ * first sweep on a private repository and never publish a verdict (Codex,
+ * mikelward/codex-review#42). Widening the App instead would make a
+ * credential that lives in an environment worth more to steal, for nothing
+ * the binding needs.
+ *
+ * Half a credential is a refusal rather than a fallback. An operator who has
+ * placed one secret and not the other is mid-migration, and publishing as
+ * `github-actions[bot]` under a ruleset that may already require the App is
+ * a gate waiting forever on a check nothing reports -- the failure this
+ * whole file exists to prevent.
+ */
+export async function resolveStatusToken(
+  { appId, privateKey, repo }, fetchImpl = fetch, sign = defaultSign,
+) {
+  if (!appId && !privateKey) return null;
+  if (!appId || !privateKey) {
+    throw new Error(
+      "app-id and app-private-key are both needed to authenticate as the App — "
+      + `only ${appId ? "app-id" : "app-private-key"} was given`,
+    );
+  }
+  return appToken({ appId, privateKey, repo }, fetchImpl, sign);
+}
+
+/**
+ * How long a minted installation token is reused before another is minted.
+ *
+ * GitHub expires one after an hour. `loop-minutes` defaults to 55 and this
+ * repository's own manifest test holds the default under 60, but the input
+ * takes any number a consumer writes, and a loop that outlives the token
+ * would keep reading happily on the workflow's token while every status
+ * write failed -- a hold or a re-review request arriving then would leave
+ * an earlier `success` standing (Codex, mikelward/codex-review#42). Ten
+ * minutes of headroom under the hour, since a sweep can take minutes.
+ */
+export const APP_TOKEN_REFRESH_MS = 50 * 60 * 1000;
+
+/**
+ * A getter for the status-writing credential that re-mints before expiry.
+ *
+ * Null throughout when no App credential is configured, and it costs
+ * nothing then: `resolveStatusToken` answers without a call. The login it
+ * carries is re-read with each minting rather than remembered across one,
+ * so an App renamed mid-run is compared against its current name.
+ */
+export function statusTokenSource(creds, fetchImpl = fetch, sign = defaultSign, now = Date.now) {
+  let minted = null;
+  let mintedAt = 0;
+  return async () => {
+    if (minted && now() - mintedAt < APP_TOKEN_REFRESH_MS) return minted;
+    minted = await resolveStatusToken(creds, fetchImpl, sign);
+    mintedAt = now();
+    return minted;
+  };
+}
+
 /** Thin GitHub client, so the sweep can be driven by a fake `fetch` in tests. */
 export function createApi({ token, fetchImpl = fetch }) {
   async function rest(path, { method = "GET", body } = {}) {
@@ -1403,13 +1584,46 @@ export function stampedNumber(description) {
   return m ? Number(m[1]) : null;
 }
 
-export async function publish(api, { owner, name, pr, verdict, current, log }) {
+/**
+ * Whether a status was posted by the App this run authenticates as.
+ *
+ * The identity is what a ruleset binds a required check to, so during a
+ * migration an existing status can be identical in state and description
+ * and still be the wrong one: written by `github-actions[bot]` before the
+ * credential was placed, it satisfies no binding (Codex,
+ * mikelward/codex-review#42).
+ *
+ * The comparison is against THAT App and not merely against "some App".
+ * Reading any non-Actions bot as correct made a rotation invisible: a head
+ * still carrying the previous App's status looked already migrated, so the
+ * rewrite was skipped and a ruleset bound to the new App waited forever on
+ * a verdict nothing would change (Codex, mikelward/codex-review#42). Logins
+ * are case-folded, as GitHub compares them.
+ */
+function postedBy(status, login) {
+  const creator = status?.creator ?? {};
+  if (creator.type !== "Bot" || typeof creator.login !== "string") return false;
+  return creator.login.toLowerCase() === login.toLowerCase();
+}
+
+export async function publish(api, { owner, name, pr, verdict, current, log, appLogin = null }) {
   const description =
     verdict.state === "success" ? stamp(verdict.description, pr.number) : verdict.description;
   // Every write shows up in the PR's check list, and a five-minute cadence
   // would otherwise bury it. It also keeps the marker still: rewriting the
   // same status would move the head's earliest-gated timestamp forward.
-  if (current?.state === verdict.state && current?.description === description) {
+  //
+  // Identical is not enough while the writer is changing: the status a
+  // consumer already has on an open head was written by whoever wrote it
+  // last -- the workflow bot before the credential was placed, or the App
+  // rotated away from -- and skipping the write would leave it there for a
+  // ruleset now bound to THIS App, a merge gate waiting forever on that
+  // head since nothing else will change its verdict. So one write happens
+  // per head that still carries a status this App did not post, and the
+  // marker moves once for it (Codex, mikelward/codex-review#42, twice).
+  const wrongWriter =
+    appLogin !== null && current !== undefined && current !== null && !postedBy(current, appLogin);
+  if (!wrongWriter && current?.state === verdict.state && current?.description === description) {
     log(`#${pr.number}: ${verdict.state} (unchanged)`);
     return false;
   }
@@ -1422,10 +1636,20 @@ export async function publish(api, { owner, name, pr, verdict, current, log }) {
 }
 
 export async function sweep({
-  owner, name, token, fetchImpl = fetch, log = console.log,
+  owner, name, token, statusToken = null, fetchImpl = fetch, log = console.log,
   streaks = new Map(), cadence = new Map(), revisitEvery = 5, now = Date.now,
 }) {
   const api = createApi({ token, fetchImpl });
+  // The App's token WRITES the status; the workflow's own token does every
+  // read. The App the README asks for holds commit statuses and nothing
+  // else -- deliberately, since a credential kept in an environment should
+  // be able to do exactly the one thing the binding is about -- so handing
+  // it the pull request, check-suite and ruleset reads too would fail the
+  // first sweep on a private repository and never publish a verdict at all
+  // (Codex, mikelward/codex-review#42). What has to change identity is the
+  // write, and only the write.
+  const writer = statusToken ? createApi({ token: statusToken.token, fetchImpl }) : api;
+  const appLogin = statusToken ? statusToken.login : null;
   const written = [];
   const failed = [];
   const open = [];
@@ -1723,7 +1947,7 @@ export async function sweep({
       // and `nudged` then outranks this anyway. Same concept, named once.
       unanswered: parkStands ? marker(node) : null,
     });
-    const changed = await publish(api, { owner, name, pr: node, verdict, current: mine[0], log });
+    const changed = await publish(writer, { owner, name, pr: node, verdict, current: mine[0], log, appLogin });
     if (changed) written.push({ number: node.number, ...verdict });
     if (verdict.state !== "pending") return 0;
     // Eyes on means the review genuinely started. That used to keep a
@@ -1801,7 +2025,7 @@ export async function sweep({
     const stillPolling = async () => {
       if (PARKED.has(verdict.description)) {
         const fresh = { state: "pending", description: PENDING };
-        if (await publish(api, { owner, name, pr: node, verdict: fresh, current: mine[0], log })) {
+        if (await publish(writer, { owner, name, pr: node, verdict: fresh, current: mine[0], log, appLogin })) {
           written.push({ number: node.number, ...fresh });
         }
       }
@@ -1830,7 +2054,7 @@ export async function sweep({
       // as before, keeping the truer word.
       if (verdict.description !== PENDING) return 0;
       const said = { state: "pending", description: marker(node) };
-      if (await publish(api, { owner, name, pr: node, verdict: said, current: mine[0], log })) {
+      if (await publish(writer, { owner, name, pr: node, verdict: said, current: mine[0], log, appLogin })) {
         written.push({ number: node.number, ...said });
       }
       return 0;
@@ -1943,7 +2167,7 @@ export async function sweep({
       });
       if (run >= MAX_FAIL_STREAK) {
         try {
-          await api.rest(`/repos/${owner}/${name}/statuses/${node.headRefOid}`, {
+          await writer.rest(`/repos/${owner}/${name}/statuses/${node.headRefOid}`, {
             method: "POST",
             body: { context: CONTEXT, state: "pending", description: UNREADABLE },
           });
@@ -2073,10 +2297,21 @@ export const input = (name, envVar) => {
 async function main() {
   // `github.token` is the default the action manifest supplies, so a consumer
   // has to opt out rather than remember to opt in.
-  const token = input("token", "GITHUB_TOKEN");
   const slug = input("repository", "GITHUB_REPOSITORY");
-  if (!token || !slug) throw new Error("a token and a repository are required");
+  const workflowToken = input("token", "GITHUB_TOKEN");
+  if (!workflowToken || !slug) throw new Error("a token and a repository are required");
   const [owner, name] = slug.split("/");
+  // Minted before the loop, and again inside it if a long one outlives the
+  // token. A failure is the run failing, not a fallback -- see
+  // `resolveStatusToken`, which also says why only the write uses it.
+  const nextStatusToken = statusTokenSource({
+    appId: input("app-id", "CODEX_APP_ID"),
+    privateKey: input("app-private-key", "CODEX_APP_PRIVATE_KEY"),
+    repo: slug,
+  });
+  // Eagerly, so a credential that cannot mint fails the run now rather
+  // than on the first head it would have gated.
+  await nextStatusToken();
   // One streak map and one cadence map for the whole run: a head failing
   // sweep after sweep accumulates toward MAX_FAIL_STREAK instead of
   // resetting every minute, and settled heads keep their revisit age.
@@ -2085,7 +2320,9 @@ async function main() {
   await runLoop({
     minutes: Number(input("loop-minutes", "SWEEP_LOOP_MINUTES") || 0),
     intervalSeconds: Number(input("interval-seconds", "SWEEP_INTERVAL_SECONDS") || 60),
-    sweepOnce: () => sweep({ owner, name, token, streaks, cadence }),
+    sweepOnce: async () => sweep({
+      owner, name, token: workflowToken, statusToken: await nextStatusToken(), streaks, cadence,
+    }),
     shouldContinue: ({ awaiting }) => awaiting > 0,
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   });

@@ -24,6 +24,11 @@ import {
   UNANSWERED,
   UNANSWERED_FORK,
   reviewTableStatus,
+  signAppJwt,
+  appToken,
+  resolveStatusToken,
+  statusTokenSource,
+  APP_TOKEN_REFRESH_MS,
 } from "./codex-review.mjs";
 
 describe("verdictFor", () => {
@@ -652,7 +657,10 @@ function fakeFetch({
   const impl = async (url, opts = {}) => {
     const path = url.replace("https://api.github.com", "");
     const method = opts.method ?? "GET";
-    calls.push({ path, method, body: opts.body ? JSON.parse(opts.body) : null });
+    calls.push({
+      path, method, body: opts.body ? JSON.parse(opts.body) : null,
+      auth: opts.headers?.authorization,
+    });
 
     if (path === "/graphql") {
       const data = queue.shift();
@@ -761,6 +769,41 @@ describe("sweep", () => {
     expect((await run(fake))[0].state).toBe("success");
   });
 
+  // What the sweep is handed once an App credential is configured: the
+  // minted token, and the login its writes appear under.
+  const APP_CREDENTIAL = { token: "ghs_app", login: "codex-verdict[bot]" };
+
+  it("writes the status as the App and reads as the workflow", async () => {
+    // The App the README asks for holds commit statuses and nothing else,
+    // so every read has to stay on the workflow's own token: routing them
+    // through the App would fail the first sweep on a private repository
+    // and never publish a verdict (Codex, mikelward/codex-review#42).
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      checkSuites: { abc1234: [bornSuite()] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+    });
+    const { written } = await sweep({
+      owner: OWNER, name: "r", token: "gh_workflow", statusToken: APP_CREDENTIAL,
+      fetchImpl: fake.impl, log: () => {}, now: TEST_NOW,
+    });
+    expect(written[0].state).toBe("success");
+    const write = fake.calls.find((c) => c.method === "POST" && c.path.includes("/statuses/"));
+    expect(write.auth).toBe("Bearer ghs_app");
+    const reads = fake.calls.filter((c) => c !== write);
+    expect(reads.length > 0).toBe(true);
+    expect(reads.every((c) => c.auth === "Bearer gh_workflow")).toBe(true);
+    // And with no App credential, one token does both -- an ordinary
+    // consumer's sweep is unchanged.
+    const plain = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      checkSuites: { abc1234: [bornSuite()] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+    });
+    await run(plain);
+    expect(plain.calls.every((c) => c.auth === "Bearer t")).toBe(true);
+  });
+
   it("stamps a success with the pull request that earned it", async () => {
     // A status belongs to the COMMIT and says nothing about which pull
     // request earned it, which is what the carry could never establish
@@ -784,6 +827,76 @@ describe("sweep", () => {
       graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
     });
     expect(await run(again)).toEqual([]);
+  });
+
+  it("rewrites an identical status the App did not post", async () => {
+    // The migration case: an open head already carries a `codex: success`
+    // from `github-actions[bot]`, identical in state and description to
+    // what this sweep would write. Skipping it as unchanged would leave a
+    // ruleset bound to the App waiting forever on that head, since nothing
+    // else will change its verdict (Codex, mikelward/codex-review#42).
+    const standing = (creator) => ({
+      abc1234: [gate("2026-08-14T12:05:00Z", "success", "Codex reviewed this head, no findings (#1)")].map(
+        (s) => ({ ...s, creator }),
+      ),
+    });
+    const workflowBot = fakeFetch({
+      statuses: standing({ login: "github-actions[bot]", type: "Bot" }),
+      checkSuites: { abc1234: [bornSuite()] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+    });
+    const { written } = await sweep({
+      owner: OWNER, name: "r", token: "gh_workflow", statusToken: APP_CREDENTIAL,
+      fetchImpl: workflowBot.impl, log: () => {}, now: TEST_NOW,
+    });
+    expect(written[0].state).toBe("success");
+    const write = workflowBot.calls.find((c) => c.method === "POST" && c.path.includes("/statuses/"));
+    expect(write.auth).toBe("Bearer ghs_app");
+    // Once the App's own status is there, the identical-write skip is back:
+    // the rewrite happens once per head, not every sweep.
+    const appPosted = fakeFetch({
+      statuses: standing({ login: "codex-verdict[bot]", type: "Bot" }),
+      checkSuites: { abc1234: [bornSuite()] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+    });
+    const second = await sweep({
+      owner: OWNER, name: "r", token: "gh_workflow", statusToken: APP_CREDENTIAL,
+      fetchImpl: appPosted.impl, log: () => {}, now: TEST_NOW,
+    });
+    expect(second.written).toEqual([]);
+    // A DIFFERENT App's status is the same finding, not a pass. Reading
+    // any non-Actions bot as correct made a rotation invisible: the head
+    // looked migrated, the rewrite was skipped, and a ruleset bound to the
+    // App now configured waited forever (Codex, mikelward/codex-review#42).
+    const otherApp = fakeFetch({
+      statuses: standing({ login: "old-verdict[bot]", type: "Bot" }),
+      checkSuites: { abc1234: [bornSuite()] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+    });
+    const rotated = await sweep({
+      owner: OWNER, name: "r", token: "gh_workflow", statusToken: APP_CREDENTIAL,
+      fetchImpl: otherApp.impl, log: () => {}, now: TEST_NOW,
+    });
+    expect(rotated.written[0].state).toBe("success");
+    // A login differing only in case is the same account, as GitHub
+    // compares them -- so that one is not rewritten.
+    const cased = fakeFetch({
+      statuses: standing({ login: "Codex-Verdict[bot]", type: "Bot" }),
+      checkSuites: { abc1234: [bornSuite()] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+    });
+    const sameApp = await sweep({
+      owner: OWNER, name: "r", token: "gh_workflow", statusToken: APP_CREDENTIAL,
+      fetchImpl: cased.impl, log: () => {}, now: TEST_NOW,
+    });
+    expect(sameApp.written).toEqual([]);
+    // And with no App credential the skip is unconditional, as before.
+    const plain = fakeFetch({
+      statuses: standing({ login: "github-actions[bot]", type: "Bot" }),
+      checkSuites: { abc1234: [bornSuite()] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+    });
+    expect(await run(plain)).toEqual([]);
   });
 
   it("leaves pending and failure descriptions unstamped", async () => {
@@ -2987,6 +3100,147 @@ describe("sweep, carrying a verdict across a generated push", () => {
 // The workflow holds `statuses: write`, and its safety is largely the
 // *absence* of something — a checkout, a branch-selectable trigger, a second
 // writer — which nothing else would notice going missing.
+
+describe("authenticating as a GitHub App", () => {
+  // The private key never has to be real: the signature is the one thing
+  // this file does not compute itself, so it is injected and asserted on
+  // rather than verified. What the tests are for is everything around it --
+  // the claims, the exchange, and what happens when either half is missing.
+  const sign = (input, key) => Buffer.from(`sig(${input.length},${key})`);
+  const decode = (part) => JSON.parse(Buffer.from(part, "base64url").toString());
+
+  it("signs a JWT the App API will accept", () => {
+    const jwt = signAppJwt(1234, "KEY", 1_000_000, sign);
+    const [header, payload, signature] = jwt.split(".");
+    expect(decode(header)).toEqual({ alg: "RS256", typ: "JWT" });
+    // Backdated for clock drift: an `iat` GitHub reads as still in the
+    // future is rejected outright, and a fast runner clock is not this
+    // file's to fix. `exp` is GitHub's own maximum for an App JWT.
+    expect(decode(payload)).toEqual({ iat: 999_940, exp: 1_000_600, iss: "1234" });
+    // The issuer is a string even when the input is a number, which is what
+    // the API requires.
+    expect(typeof decode(payload).iss).toBe("string");
+    expect(Buffer.from(signature, "base64url").toString()).toBe(`sig(${header.length + payload.length + 1},KEY)`);
+    expect(signature.includes("+")).toBe(false);
+    expect(signature.includes("/")).toBe(false);
+  });
+
+  const exchange = (over = {}) => {
+    const calls = [];
+    const responses = {
+      "/repos/o/r/installation": { ok: true, status: 200, json: async () => ({ id: 99, app_slug: "codex-verdict" }) },
+      "/app/installations/99/access_tokens": { ok: true, status: 201, json: async () => ({ token: "ghs_minted" }) },
+      ...over,
+    };
+    const fetchImpl = async (url, init) => {
+      const path = url.replace("https://api.github.com", "");
+      calls.push({ path, method: init?.method ?? "GET", auth: init?.headers?.authorization });
+      return responses[path] ?? { ok: false, status: 404 };
+    };
+    return { calls, fetchImpl };
+  };
+
+  it("exchanges the App credential for an installation token", async () => {
+    const { calls, fetchImpl } = exchange();
+    // The login travels with the token: it is what a ruleset binds the
+    // required check to, and the only call that knows WHICH App the
+    // configured credential is is this one.
+    expect(await appToken({ appId: 1, privateKey: "KEY", repo: "o/r" }, fetchImpl, sign))
+      .toEqual({ token: "ghs_minted", login: "codex-verdict[bot]" });
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "GET /repos/o/r/installation",
+      "POST /app/installations/99/access_tokens",
+    ]);
+    // Both legs carry the JWT, not a token: the installation lookup is what
+    // the JWT is for, and the minting call is authenticated the same way.
+    expect(calls.every((c) => c.auth.startsWith("Bearer ey"))).toBe(true);
+  });
+
+  it("names which leg of the exchange failed, and never the credential", async () => {
+    const missing = exchange({ "/repos/o/r/installation": { ok: false, status: 404 } });
+    await expect(appToken({ appId: 1, privateKey: "KEY", repo: "o/r" }, missing.fetchImpl, sign))
+      .rejects.toThrow(/installation on o\/r \(404\)/);
+    const refused = exchange({ "/app/installations/99/access_tokens": { ok: false, status: 401 } });
+    await expect(appToken({ appId: 1, privateKey: "KEY", repo: "o/r" }, refused.fetchImpl, sign))
+      .rejects.toThrow(/mint an installation token \(401\)/);
+    // The key is never in the message: a failed exchange is the case most
+    // likely to be pasted into an issue.
+    const caught = await appToken({ appId: 1, privateKey: "SECRET", repo: "o/r" }, refused.fetchImpl, sign)
+      .catch((err) => err.message);
+    expect(caught.includes("SECRET")).toBe(false);
+    // An installation that names no slug leaves the App unidentified, and
+    // then neither answer about an existing status is safe: trusting it
+    // blocks a bound ruleset forever, rewriting it walks the marker forward
+    // every sweep. So it refuses rather than guessing, and never mints.
+    for (const body of [{ id: 99 }, { id: 99, app_slug: "" }, { id: 99, app_slug: 7 }]) {
+      const nameless = exchange({
+        "/repos/o/r/installation": { ok: true, status: 200, json: async () => body },
+      });
+      await expect(appToken({ appId: 1, privateKey: "KEY", repo: "o/r" }, nameless.fetchImpl, sign))
+        .rejects.toThrow(/named no app_slug/);
+      expect(nameless.calls.map((c) => c.path)).toEqual(["/repos/o/r/installation"]);
+    }
+  });
+
+  it("writes with the workflow's own token when no App credential is given", async () => {
+    const { calls, fetchImpl } = exchange();
+    expect(await resolveStatusToken({ appId: "", privateKey: "", repo: "o/r" }, fetchImpl, sign)).toBe(null);
+    // Not a single call: an ordinary consumer pays nothing for the option.
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses half a credential rather than falling back", async () => {
+    // An operator mid-migration has placed one secret and not the other.
+    // Falling back would publish as `github-actions[bot]` under a ruleset
+    // that may already require the App -- a gate waiting forever on a check
+    // nothing reports, which is the failure this file exists to prevent.
+    const { calls, fetchImpl } = exchange();
+    await expect(resolveStatusToken({ appId: "1", privateKey: "", repo: "o/r" }, fetchImpl, sign))
+      .rejects.toThrow(/only app-id was given/);
+    await expect(resolveStatusToken({ appId: "", privateKey: "KEY", repo: "o/r" }, fetchImpl, sign))
+      .rejects.toThrow(/only app-private-key was given/);
+    expect(calls).toEqual([]);
+  });
+
+  it("re-mints before the token can expire in a long loop", async () => {
+    // `loop-minutes` takes any number a consumer writes, and an
+    // installation token lasts an hour: a loop that outlives one would keep
+    // reading on the workflow's token while every status write failed, so a
+    // hold arriving then would leave an earlier success standing (Codex,
+    // mikelward/codex-review#42).
+    let clock = 0;
+    let minted = 0;
+    const counting = async (url, init) => {
+      if (url.endsWith("/access_tokens")) minted += 1;
+      return exchange().fetchImpl(url, init);
+    };
+    const next = statusTokenSource(
+      { appId: "1", privateKey: "KEY", repo: "o/r" }, counting, sign, () => clock,
+    );
+    const credential = { token: "ghs_minted", login: "codex-verdict[bot]" };
+    expect(await next()).toEqual(credential);
+    clock += APP_TOKEN_REFRESH_MS - 1;
+    expect(await next()).toEqual(credential);
+    expect(minted).toBe(1);
+    clock += 1;
+    expect(await next()).toEqual(credential);
+    expect(minted).toBe(2);
+  });
+
+  it("costs nothing per sweep when no App credential is configured", async () => {
+    const { calls, fetchImpl } = exchange();
+    const next = statusTokenSource({ appId: "", privateKey: "", repo: "o/r" }, fetchImpl, sign);
+    expect(await next()).toBe(null);
+    expect(await next()).toBe(null);
+    expect(calls).toEqual([]);
+  });
+
+  it("mints when both halves are given", async () => {
+    const { fetchImpl } = exchange();
+    expect(await resolveStatusToken({ appId: "1", privateKey: "KEY", repo: "o/r" }, fetchImpl, sign))
+      .toEqual({ token: "ghs_minted", login: "codex-verdict[bot]" });
+  });
+});
 
 describe("runLoop", () => {
   // Fake clock: sleeping is what advances time, so the deadline arithmetic

@@ -18,11 +18,13 @@ runs:
 inputs:
   token:
     description: >-
-      Token used to read pull requests and check suites and to write the
-      `codex` commit status. The default is the workflow's own
-      `GITHUB_TOKEN`, so the calling job grants the scope rather than
-      minting a secret: it needs `statuses: write` plus read on contents,
-      pull-requests and checks.
+      Token used to read pull requests, check suites and commit statuses,
+      and — unless `app-id` is supplied — to write the `codex` status. The
+      default is the workflow's own `GITHUB_TOKEN`, so the calling job
+      grants the scope rather than minting a secret: it needs
+      `statuses: write` plus read on contents, pull-requests and checks.
+      With an App credential the write moves to the App, but the read does
+      not, so the grant becomes `statuses: read` rather than nothing.
     required: false
     default: ${{ github.token }}
   repository:
@@ -32,6 +34,26 @@ inputs:
       only so the sweep can be pointed elsewhere by hand when debugging.
     required: false
     default: ${{ github.repository }}
+  app-id:
+    description: >-
+      The GitHub App this sweep authenticates as, so the `codex` status is
+      posted by an identity a ruleset can bind the required check to.
+      Without it the status is posted by `github-actions[bot]` -- the
+      identity every workflow in the repository holds, which no binding can
+      separate from any other writer of the same name. Supply it with
+      `app-private-key`, from an environment only this job declares, and
+      drop `statuses: write` from the caller's permissions. Both halves or
+      neither: half a credential is a hard failure rather than a quiet
+      fallback to the workflow's own token.
+    required: false
+    default: ''
+  app-private-key:
+    description: >-
+      The private key of the App named by `app-id`, in PEM form, as
+      downloaded from the App's settings page. Used once per run to mint a
+      short-lived installation token; nothing is stored.
+    required: false
+    default: ''
   loop-minutes:
     description: >-
       How long one run keeps sweeping while a head is still awaiting. The
