@@ -465,24 +465,32 @@ class TheTemplatesThemselves(unittest.TestCase):
         # `workflow_dispatch` takes a ref and GitHub runs the workflow file
         # FROM that ref, so a branch could ship its own steps and keep the
         # `statuses: write` token. A bare `pull_request` has the same hole via
-        # the merge ref, and `pull_request_review` is merge-ref too -- which is
-        # why it lives on the unprivileged listener and is relayed.
-        for unsafe in ("workflow_dispatch", "pull_request", "pull_request_review"):
+        # the merge ref, and so does `pull_request_review`. The two comment
+        # events belong here too: neither is base-ref-pinned, and a
+        # `pull_request_review_comment` was observed running a workflow file
+        # that existed only on a pull request branch. Every one of them lives
+        # on the unprivileged listener and is relayed.
+        for unsafe in (
+            "workflow_dispatch",
+            "pull_request",
+            "pull_request_review",
+            "issue_comment",
+            "pull_request_review_comment",
+        ):
             self.assertNotIn(unsafe, self.triggers)
 
     def test_starts_on_every_event_a_verdict_can_arrive_through(self):
         # Dropping any of these is a delivery form no consumer hears, and the
         # gate then waits on the four-hourly backstop instead of the minute
         # clock -- which is a longer wait than it used to be, so the events
-        # matter more than they did, not less.
-        for needed in (
-            "schedule",
-            "pull_request_target",
-            "issue_comment",
-            "pull_request_review_comment",
-            "workflow_run",
-        ):
+        # matter more than they did, not less. The comment events are among
+        # them and reach the sweep through `workflow_run`, so the listener is
+        # asserted to carry them rather than this file.
+        for needed in ("schedule", "pull_request_target", "workflow_run"):
             self.assertIn(needed, self.triggers)
+        listener = yaml.safe_load(check_consumer.template(LISTENER))
+        for relayed in ("issue_comment", "pull_request_review_comment"):
+            self.assertIn(relayed, listener[True])
 
     def test_pins_the_backstop_cadence_itself(self):
         # The trigger check above only asks that a `schedule` key exists, so
@@ -542,14 +550,35 @@ class TheTemplatesThemselves(unittest.TestCase):
 
     def test_the_listener_holds_nothing_and_relays_by_name(self):
         # The relay is a name match, so the two ends are asserted together:
-        # renaming one alone severs it in silence, and a verdict submitted as a
-        # review with no inline comments then goes unheard.
+        # renaming one alone severs it in silence, and every delivery it
+        # carries then goes unheard.
         listener = yaml.safe_load(check_consumer.template(LISTENER))
         self.assertEqual(listener["permissions"], {})
-        self.assertIn("pull_request_review", listener[True])
+        for event in ("pull_request_review", "issue_comment", "pull_request_review_comment"):
+            self.assertIn(event, listener[True])
+        # It holds every event whose definition a branch can supply, so the
+        # shipped file must grant nothing and do nothing. Asserted as the
+        # exact step list, not as "no `uses` key": that only proved the step
+        # is not an action, so `run:` could become any shell command and
+        # ship to every consumer with the suite still green (Codex,
+        # mikelward/codex-review#43).
+        self.assertEqual(listener["jobs"]["heard"]["steps"], [{"run": "true"}])
         self.assertEqual(
             self.triggers["workflow_run"]["workflows"], [listener["name"]]
         )
+
+    def test_every_shape_offered_here_is_one_a_consumer_could_hold(self):
+        # The shapes actually on disk, not synthesized ones. An incomplete or
+        # oddly-named label is an authoring mistake in THIS repository that
+        # would fail every consumer for a defect in the mechanism, and a shape
+        # identical to the current templates is a migration that has nothing
+        # left to migrate -- dead weight that keeps the pin multi-shaped and
+        # silently accepts the current files under two names.
+        current = {name: check_consumer.template(name) for name in check_consumer.TEMPLATES}
+        for label, files in check_consumer.superseded_shapes().items():
+            self.assertRegex(label, check_consumer.LABEL)
+            self.assertEqual(sorted(files), sorted(check_consumer.TEMPLATES), label)
+            self.assertNotEqual(files, current, label)
 
     def test_the_caller_grants_nothing_and_names_the_shared_check(self):
         caller = yaml.safe_load(check_consumer.template(CALLER))

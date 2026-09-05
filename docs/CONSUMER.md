@@ -106,37 +106,56 @@ The comment events (`issue_comment`, `pull_request_review_comment`, both on
 the same head plus an `@codex review` nudge changes the verdict with no
 `pull_request` event anywhere, and the reactions that follow emit nothing. The
 `edited` type is there because a nudge can be edited into an existing comment,
-and the sweep dates such an ask by its edit time.
+and the sweep dates such an ask by its edit time. They are declared on the
+**listener**, not here, and reach the sweep through the relay below.
 
-**Those two comment events are NOT base-ref-pinned**, which is easy to assume
-and is false: in `mikelward/lanes`, a `pull_request_review_comment` ran the
-workflow *from the pull request branch*, with `statuses: write`, while `main`
-still held the old version. No guard written in the workflow can close that —
-an `if:` on the actor, a narrower `permissions:` block, a step diffing against
-`main` are all supplied by the same branch they would constrain.
+### The listener, and why it holds every branch-supplied event
 
-They stay anyway, and not because the exposure is small. Reaching that route
-needs a branch **in the consumer repository**, and anyone who can push one can
-publish `codex: success` far more simply with any workflow declaring
-`on: push` and `permissions: statuses: write`. Dropping the two events would
-close one door in a room with an open wall, while costing the rebuttal round
-its minute clock. What would actually bind, the day push access goes to someone
-whose merges should not be self-approvable, is holding the credential in an
-environment whose deployment-branch policy allows only the default branch, so a
-branch's job cannot obtain it at all. Editing the trigger list is not that, and
-must not be mistaken for it.
+Three deliveries arrive on events whose workflow definition GitHub resolves
+against a ref a pull request branch controls:
 
-### The listener, and why it is a separate file
+- **A review with no inline comments.** Codex sometimes delivers findings that
+  way, and it emits neither comment event and no reaction, so nothing else
+  hears it. The event is `pull_request_review`, resolved against the pull
+  request's own merge ref.
+- **The comment events**, which are **NOT base-ref-pinned** — easy to assume
+  and false: in `mikelward/lanes`, a `pull_request_review_comment` ran the
+  workflow *from the pull request branch*, with `statuses: write`, while
+  `main` still held the old version.
 
-Codex sometimes delivers findings as a review with **no inline comments**. That
-emits neither comment event and no reaction, so nothing else hears it.
-
-The event is `pull_request_review`, and GitHub resolves its workflow definition
-against the pull request's own merge ref. On a file holding `statuses: write`,
-a same-repository branch could therefore substitute its own steps. The relay
-splits the event from the privilege: the listener declares no permissions and
-does one no-op step, and its completion starts the sweep through
+No guard written in the workflow can close that — an `if:` on the actor, a
+narrower `permissions:` block, a step diffing against `main` are all supplied
+by the same branch they would constrain. So the relay splits the event from
+the privilege instead: the listener declares no permissions, runs one no-op
+step and checks nothing out, and its completion starts the sweep through
 `workflow_run`, whose definition GitHub always takes from the default branch.
+
+**What that buys, exactly.** The file holding `statuses: write` is started
+only by events GitHub resolves from a ref no branch controls, so the templated
+sweep is no longer a route to a forged status. That is unconditional and it is
+the whole of it.
+
+**What it does not buy: safety for a secret.** The listener's own definition
+comes from the same branch-controlled ref, so a branch can add `environment:`
+and read `secrets.*` there as easily as it can replace the steps — and it does
+not even need this file, since a branch can add a workflow of its own on the
+same event. A deployment-branch policy authorizes by the ref the run *reports*,
+and the anomaly is precisely a run that reported the default branch while
+executing a branch-only file. No arrangement of triggers across these three
+files closes that, and none of them should be read as closing it.
+
+The comment events used to sit on the sweep, and the argument for leaving them
+there was that reaching the route needs a branch **in the consumer
+repository** — and anyone who can push one can publish `codex: success` far
+more simply with any workflow declaring `on: push` and
+`permissions: statuses: write`. That argument still holds for the status; what
+it never covered is the sweep becoming a file that reads a credential. Moving
+the events is necessary for that and is not sufficient for it, and whether an
+environment can be a boundary here at all turns on the anomaly above being
+real, which one observation does not settle.
+
+What the move costs is one extra hop: a comment now starts the listener, and
+the sweep follows on its completion. Seconds, against a four-hourly backstop.
 
 The relay is a **name match**, so renaming either end severs it in silence.
 Both names are pinned.
@@ -157,10 +176,12 @@ It does not work, because a check run lands wherever its **event** decides
 while the verdict is a commit status on a specific SHA:
 
 - `pull_request_target` attaches to the pull request head (verified:
-  `mikelward/mesh#522`, run 31945656570), as does
-  `pull_request_review_comment` (verified: `mikelward/lanes`, run 31967032933).
-- `issue_comment` and `workflow_run` run against the default branch, so their
-  checks land there and cannot invalidate anything on the head.
+  `mikelward/mesh#522`, run 31945656570), as did `pull_request_review_comment`
+  while the sweep still declared it (verified: `mikelward/lanes`, run
+  31967032933).
+- `workflow_run` runs against the default branch, so its checks land there and
+  cannot invalidate anything on the head — and it is now how every comment
+  reaches the sweep.
 
 And the part that makes requiring it actively unsafe rather than merely
 incomplete: a concurrency group holds **one** pending run.
@@ -191,7 +212,7 @@ queue behind it — to the 6-hour job default, stalling the gate silently.
 
 Events start a run within seconds; the run polls every minute for up to ~55.
 Codex also edits its review summary comment in place as a review starts and
-finishes, and that edit is an `issue_comment` the sweep wakes on — so even a
+finishes, and that edit is an `issue_comment` the listener relays — so even a
 verdict that emits no reaction of its own usually announces itself. Everything
 the schedule alone catches is rare and fails **closed** — a dropped webhook
 leaves the new head pending — and any comment on the pull request clears those

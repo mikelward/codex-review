@@ -390,29 +390,66 @@ recurring chore in repositories designed to have nothing to bump.
 of `actions/*` references the change would then flag. Nothing else
 depends on the choice.
 
+## Open gap: an environment may not be a boundary against a collaborator
+
+**Blocks the hardened template under *Later*, and it is the maintainer's call.**
+
+The App migration rests on one premise: an environment whose deployment-branch
+policy names only the default branch keeps its secret out of a collaborator's
+reach. A policy authorizes by the ref a run **reports**, and `docs/CONSUMER.md`
+records a run that reported the default branch while executing a workflow file
+that existed only on a pull request's branch. If that is what it looked like,
+the premise is false: a branch can declare `environment: codex-review` on a
+workflow of its own, pass the policy on the default branch's name, and be
+handed the private key — and its forgeries would carry the App's own
+attribution rather than the workflow bot's.
+
+**No arrangement of triggers closes it** (Codex, #43). Moving the comment
+events onto the listener took the branch-controlled events off the file that
+holds `statuses: write`, which is worth having on its own — the templated
+sweep is no longer a route to a forged status. But the listener's definition
+comes from that same branch-controlled ref, and an attacker need not use the
+listener, or any file this repository ships.
+
+What would settle it is evidence rather than reasoning: does a branch-supplied
+definition really run on `issue_comment` / `pull_request_review_comment`?
+GitHub documents that it does not. One observation says otherwise, and it was
+not instrumented — the run was noticed by its failure, not measured. Until
+that is settled, placing the key is a decision about how far to trust the
+anomaly, and README says so where an operator placing it will read it.
+
 ## Later
 
 - Implement the fork remedy above, before consumers start requiring
   `codex-review-check` in their rulesets.
+- **Finish the `comment-relay` migration, then delete its shape.** Both
+  comment events now live on the listener and reach the sweep through
+  `workflow_run`; the outgoing shape is `templates/superseded/comment-relay/`.
+  Every consumer copies `templates/` one at a time, simmo last, and **the
+  directory comes out when the last one has moved** — left in place, the pin
+  quietly accepts two shapes forever. Delete it on the strength of a
+  `scripts/check-consumers.sh` run whose `unread:` list is empty, never a
+  notice.
 - **Ship the hardened template, and note what it costs first.** The action
   can now mint its own App token; what remains is the `templates/` change
   that uses it — the sweep job declaring a `codex-review` environment,
-  taking `app-id`/`app-private-key` from it, and dropping `statuses: write`.
-  Two things gate that, and neither is optional:
-  - **The comment triggers have to move first.** README's *Binding the
-    status against collaborators* states the rule the credential depends on
-    as absolute: nothing but `workflow_run`, `schedule` and
-    `pull_request_target` may trigger the job that can read the key, and the
-    templated sweep still subscribes to `issue_comment` and
-    `pull_request_review_comment` directly. One of those has been observed
-    running a workflow file that existed only on a pull request's branch
-    while reporting the default branch as its ref, which a deployment-branch
-    policy would authorize — turning the credential into an exfiltration
-    target whose forgeries would carry the App's own attribution. They relay
-    through the listener, as `pull_request_review` already does, or they go.
-  - **It is a template migration**, so it takes a
+  taking `app-id`/`app-private-key` from it, and changing `statuses: write`
+  to `statuses: read`. Two things gate it:
+  - **The open gap above** — whether an environment is a boundary here at
+    all. That one is the maintainer's to settle, and it is about evidence,
+    not about this repository's code.
+  - **It is a template migration**, so it takes its own
     `templates/superseded/<label>/` directory holding all three outgoing
-    files, one consumer at a time afterwards, and simmo last.
+    files, one consumer at a time afterwards, and simmo last. Cheapest
+    immediately after `comment-relay` finishes, so the two migrations do not
+    overlap and each label's consumers stay countable.
+
+  The trigger prerequisite this used to carry is **done**: the rule it
+  depended on — nothing but `workflow_run`, `schedule` and
+  `pull_request_target` triggering the job that can read the key — is now
+  satisfied by the shipped templates, and was satisfied *before* the
+  credential arrived rather than alongside it. It was necessary and it is
+  not sufficient; the open gap above is what is left.
 
   The per-repository side — installing the App, placing the pair in its own
   environment, restricting that environment to the default branch — is

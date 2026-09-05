@@ -26,8 +26,8 @@ see [Why the workflow lives in your repo](#why-the-workflow-lives-in-your-repo).
 # arrive with nothing to announce it.
 #
 # The event triggers below carry almost all of it: Codex edits its review
-# summary comment in place as a review starts and finishes, and an edit is an
-# `issue_comment` this workflow already wakes on. The schedule is the backstop
+# summary comment in place as a review starts and finishes, and an edit is a
+# comment event the listener relays here. The schedule is the backstop
 # for what no event reports -- a verdict Codex never delivers, a run that
 # never picked a push up -- so it runs every four hours rather than hourly.
 # On a private repository each firing is billed by the minute, and a backstop
@@ -52,10 +52,6 @@ on:
     - cron: '23 */4 * * *'
   pull_request_target:
     types: [opened, reopened, ready_for_review, synchronize, edited, closed]
-  issue_comment:
-    types: [created, edited]
-  pull_request_review_comment:
-    types: [created, edited]
   workflow_run:
     workflows: [codex-review-listener]
     types: [completed]
@@ -78,15 +74,27 @@ jobs:
 And alongside it, as `codex-review-listener.yml`, the unprivileged half:
 
 ```yaml
-# Hears the one verdict delivery the sweep's own triggers cannot safely hear:
-# a review with no inline comments, which emits neither comment event and no
-# reaction. `pull_request_review` is a merge-ref event, so it must never
-# appear on a workflow that can write commit statuses; this one holds nothing
-# and relays through `workflow_run`. See docs/CONSUMER.md.
+# Hears the verdict deliveries the sweep's own triggers cannot safely hear,
+# and relays them to it: a review with no inline comments (which emits neither
+# comment event and no reaction), and every comment on a pull request.
+#
+# All three events resolve their workflow definition against a ref a pull
+# request branch can control, so none of them may appear on a file that holds
+# a credential or `statuses: write`. This one holds neither -- no permissions
+# and one no-op step -- so a branch substituting its own steps here gets a
+# runner and nothing else. The sweep starts from this file's completion
+# through `workflow_run`, whose definition GitHub always takes from the
+# default branch. See docs/CONSUMER.md.
+#
+# The relay is a NAME match, so renaming either end severs it in silence.
 name: codex-review-listener
 on:
   pull_request_review:
     types: [submitted, edited, dismissed]
+  issue_comment:
+    types: [created, edited]
+  pull_request_review_comment:
+    types: [created, edited]
 permissions: {}
 jobs:
   heard:
@@ -365,27 +373,34 @@ the merge ref. Neither is in the list above, deliberately. Pinning the checkout
 does not help when the branch supplies the steps around it, which is why the fix
 is the trigger list rather than a `ref:`.
 
-**Treat the comment events as unverified rather than base-ref-pinned.** GitHub
-documents `issue_comment` and `pull_request_review_comment` as default-branch
-events — `GITHUB_REF` and `GITHUB_SHA` both point at the default branch — which
-would mean a pull request cannot supply the definition through either. Against
-that, a `pull_request_review_comment` in one consuming repository was observed
+**The comment events are on the listener, and that is why.** GitHub documents
+`issue_comment` and `pull_request_review_comment` as default-branch events —
+`GITHUB_REF` and `GITHUB_SHA` both point at the default branch — which would
+mean a pull request cannot supply the definition through either. Against that,
+a `pull_request_review_comment` in one consuming repository was observed
 starting a run whose recorded workflow path was a file that existed only on the
 pull request's branch, failing on an action reference that appeared nowhere on
 the default branch. Whatever the mechanism, what executed there was not the base
 version.
 
-It does not change what you should do, which is why this is a note rather than
-a warning. **Reaching that route needs a branch in this repository** — a fork
-cannot, because a fork's workflow files are not in your repository for any of
-these events to run — and anyone who can push such a branch can publish the
-status far more simply, with any `on: push` workflow declaring
-`permissions: statuses: write`, which unambiguously runs the branch's own
-definition. So dropping the comment events buys little either way. If you need
-to bind this against collaborators, the fix is a credential held out of their
-reach — see [Binding the status against
-collaborators](#binding-the-status-against-collaborators); editing the trigger
-list is not that.
+For the status itself that buys an attacker little: **reaching the route needs
+a branch in this repository** — a fork cannot, because a fork's workflow files
+are not in your repository for any of these events to run — and anyone who can
+push such a branch can publish the status far more simply, with any `on: push`
+workflow declaring `permissions: statuses: write`. Both comment events sit on
+the unprivileged listener anyway, and reach the sweep through `workflow_run`,
+whose definition GitHub always takes from the default branch — the same relay
+`pull_request_review` has always used. Nothing but `workflow_run`, `schedule`
+and `pull_request_target` starts the job that holds `statuses: write`, so the
+templated sweep is not a route to a forged status at all.
+
+**Do not read that as a secret being safe on the listener.** Its definition
+comes from the same branch-controlled ref, so a branch can add `environment:`
+and read `secrets.*` there as easily as it can replace the steps — and it does
+not need this file to do it, since a branch can add a workflow of its own on
+the same event. See [Binding the status against
+collaborators](#binding-the-status-against-collaborators) for what that leaves
+open.
 
 Do not read any of this as "fork pull requests get a weak token."
 `pull_request_target` runs in the **base** repository's context and its
@@ -468,24 +483,27 @@ publish, and holding that credential where branch code can never reach it:
    specifically**, not from any source. This is the step that closes the
    door; the previous four only make it possible.
 
-**Relay the comment triggers first — this step is load-bearing, not
-optional.** The sweep as templated above subscribes to `issue_comment` and
-`pull_request_review_comment`, and the section above records that one of
-those was observed running a workflow file that existed only on a pull
-request's branch while reporting the default branch as its ref. That is
-tolerable today, because the branch could publish the status directly
-anyway. It stops being tolerable the moment this job can read an App key:
-a deployment-branch policy authorizes by the ref the run reports, so a
-collaborator's branch would supply its own steps, pass the policy on the
-default branch's name, and be handed the private key — turning the
-credential from a boundary into an exfiltration target, and the resulting
-forgery would carry the App's own attribution. So before adding the
-secret, move both comment events onto the unprivileged listener and relay
-them through `workflow_run` exactly as `pull_request_review` already is,
-or drop them (the schedule and `pull_request_target` still cover every
-verdict, a cron interval later). The rule the credential depends on is
-absolute: **nothing but `workflow_run`, `schedule`, and
-`pull_request_target` may trigger the job that can read the key.**
+**The rule the credential depends on is absolute: nothing but
+`workflow_run`, `schedule`, and `pull_request_target` may trigger the job
+that can read the key.** The templates above satisfy it, and if you add a
+trigger of your own to the sweep, that rule is the one to check it against.
+
+**Necessary, and not sufficient — read this before placing the key.** A
+deployment-branch policy authorizes by the ref a run *reports*, and the
+comment-event anomaly above is a run that reported the default branch while
+executing a file that existed only on a pull request's branch. If that is
+what it looked like, then a collaborator's branch can declare
+`environment: codex-review` on a workflow of its own, pass the policy on the
+default branch's name, and be handed the private key — and the forgery would
+carry the App's own attribution. Keeping the sweep's trigger list clean does
+not close that, because the attacker need not use the sweep, or any file this
+repository ships.
+
+So the boundary this section describes rests on GitHub's documented behavior
+(a comment event runs the default branch's definition, and only that) rather
+than on the anomaly, and one observation is not enough to settle which is
+true. Establish that before trusting an environment with the key on a
+repository whose collaborators you would not trust to publish the status.
 
 Prerequisites, stated honestly. Environments with deployment branch
 policies and environment secrets are free on public repositories but need a
