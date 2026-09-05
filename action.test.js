@@ -80,11 +80,12 @@ const importLines = (source) =>
  * A sample carrying each form, so the matcher is exercised before it is
  * trusted.
  *
- * The usual guard — "it found at least one" — is the wrong one here: this
- * script imports nothing at all, which is the strongest form of the property
- * and would fail such a check. What can still go wrong is the matcher quietly
- * matching nothing, making an empty result mean "none found" rather than "none
- * present". Checking it against known input separates those two.
+ * The usual guard — "it found at least one" — is the wrong one for the
+ * property being checked: what the script imports is a `node:` builtin or
+ * nothing, and both are shapes a count cannot tell from a matcher that has
+ * stopped matching. Checking it against known input separates those two, and
+ * pinning the specifiers it extracts keeps the extractor honest as well as
+ * the matcher.
  */
 const IMPORT_FORMS = [
   'import a from "pkg";',
@@ -108,7 +109,7 @@ describe("action.yml", () => {
     // against an empty set is empty -- so a regex that stops matching (a
     // reindented manifest, a renamed helper) turns both of them green while
     // checking nothing. This is the case that makes the rest mean something.
-    expect(declared.length).toBe(4);
+    expect(declared.length).toBe(6);
     expect(consumed.length > 0).toBe(true);
   });
 
@@ -513,13 +514,22 @@ describe("action.yml", () => {
     // `import "pkg"`, a dynamic `import()` -- and would go green on the first
     // form it did not know.
     //
-    // Not "no external imports" but "no imports": the sweep reaches for
-    // nothing at all, which is what makes reviewing it a matter of reading one
-    // file. Collected and compared to empty rather than asserted absent, and
-    // the matcher checked against IMPORT_FORMS first so an empty list means
-    // none are present rather than none were found.
+    // The line is a `node:` builtin, not "no imports at all". The property
+    // that matters is that what the runner executes is what a reader reads:
+    // nothing to pin, nothing to fetch, nothing to build. A builtin is part
+    // of the runtime the manifest already names, so it costs a reader one
+    // known name and costs a reviewer nothing -- while the whole class this
+    // guards against, a package resolved from a registry, stays refused.
+    // mikelward/lanes draws the line in the same place, for the same reason.
+    // Collected and compared rather than asserted absent, and the matcher
+    // checked against IMPORT_FORMS first so a passing list means the forms
+    // are recognized rather than that none were found.
     expect(importLines(IMPORT_FORMS)).toHaveLength(4);
-    expect(importLines(script)).toEqual([]);
+    const specifier = (line) => /from\s*"([^"]+)"|import\s*\(?\s*"([^"]+)"/.exec(line)?.slice(1).find(Boolean);
+    expect(importLines(IMPORT_FORMS).map(specifier)).toEqual(["pkg", "side-effect", "dynamic", "node:fs"]);
+    for (const line of importLines(script)) {
+      expect(specifier(line)?.startsWith("node:")).toBe(true);
+    }
   });
 });
 

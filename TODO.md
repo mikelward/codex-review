@@ -143,6 +143,56 @@ Guesses made under autopilot, recorded here so nothing decided without the
 repository owner silently becomes permanent. Each says what was decided, what
 the alternative was, and why it is reversible.
 
+### The sweep mints its own App token, and the file now has one import
+
+**Decided (2026-09-05):** the action takes `app-id` and `app-private-key`
+and performs the App exchange itself, rather than the consumer's workflow
+running `actions/create-github-app-token` and passing the result to `token`
+(which is what the README told them to do, and still works).
+
+**Why:** a consumer's workflow is the thing this repository asks to stay
+reviewable by reading it — no dependencies, nothing to pin. A token-minting
+step puts a third-party action, at a SHA somebody has to keep current, into
+every consumer's hardened workflow. Minting here keeps that surface where it
+already is, and matches mikelward/lanes, which takes the same two inputs for
+the same reason.
+
+**The cost, and the reason this is written down:** `codex-review.mjs` now
+imports `createSign` from `node:crypto` — the first import in the file, and
+`action.test.js` said "no imports at all". I relaxed it to "`node:` builtins
+only", not to admit a library: the property that rule protects is that what
+the runner executes is what a reader reads, and a builtin is part of the
+runtime `action.yml` already names. Everything a registry could supply is
+still refused, and `package.json` and `node_modules` are still asserted
+absent. The alternative was hand-rolling the PKCS#1-to-PKCS#8 wrapping that
+WebCrypto would need to avoid the import, which is more crypto plumbing to
+review, not less.
+
+**Reversible** at the cost of going back to the token-minting step: the
+inputs are optional and every consumer that supplies neither is unaffected.
+
+### An installation that names no App refuses rather than guessing
+
+**Decided (2026-09-05, review round 3 on PR #42):** the identity a standing
+`codex` status is compared against is the configured App's own login, read
+from the installation lookup's `app_slug`; a response carrying no usable
+slug fails the run.
+
+**Why:** the comparison decides whether an identical status is rewritten
+once during a migration. With the App unnamed there is no safe default:
+treating a standing status as correct leaves a ruleset bound to the new App
+blocked forever on heads nothing will change, and treating it as wrong
+rewrites every open head on every sweep, walking the earliest-gated marker
+forward with each one — the marker the carried verdict reads. Both are worse
+than a run that stops and says the installation named no App.
+
+**The alternative** was to keep publishing with the token and skip the
+rewrite decision when the identity is unknown, which is the first of those
+two failures with a quieter name.
+
+**Reversible**: it is one guard in `appToken`, and it only fires for a
+consumer that has configured the App at all.
+
 ### Every `codex: success` now names the pull request that earned it
 
 **Decided (2026-09-05, review round 9 on PR #41):** `publish` appends
@@ -344,3 +394,28 @@ depends on the choice.
 
 - Implement the fork remedy above, before consumers start requiring
   `codex-review-check` in their rulesets.
+- **Ship the hardened template, and note what it costs first.** The action
+  can now mint its own App token; what remains is the `templates/` change
+  that uses it — the sweep job declaring a `codex-review` environment,
+  taking `app-id`/`app-private-key` from it, and dropping `statuses: write`.
+  Two things gate that, and neither is optional:
+  - **The comment triggers have to move first.** README's *Binding the
+    status against collaborators* states the rule the credential depends on
+    as absolute: nothing but `workflow_run`, `schedule` and
+    `pull_request_target` may trigger the job that can read the key, and the
+    templated sweep still subscribes to `issue_comment` and
+    `pull_request_review_comment` directly. One of those has been observed
+    running a workflow file that existed only on a pull request's branch
+    while reporting the default branch as its ref, which a deployment-branch
+    policy would authorize — turning the credential into an exfiltration
+    target whose forgeries would carry the App's own attribution. They relay
+    through the listener, as `pull_request_review` already does, or they go.
+  - **It is a template migration**, so it takes a
+    `templates/superseded/<label>/` directory holding all three outgoing
+    files, one consumer at a time afterwards, and simmo last.
+
+  The per-repository side — installing the App, placing the pair in its own
+  environment, restricting that environment to the default branch — is
+  mikelward/repo's `repo setup`, and the ruleset binding then follows from
+  the App-binding work there. The App is a SEPARATE one from lanes's
+  (maintainer, 2026-09-05).

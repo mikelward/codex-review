@@ -439,11 +439,31 @@ publish, and holding that credential where branch code can never reach it:
    `schedule`) all run against the base or default branch ref, not the
    topic branch.
 4. **Point the sweep at the App token**: declare the environment on the
-   sweep job, mint an installation token in a step before the action
-   (GitHub's own `actions/create-github-app-token` does this from the App
-   ID and key), pass it as this action's `token` input, and drop
-   `statuses: write` from the workflow's `permissions` block — the
-   workflow's own token no longer needs to write anything.
+   sweep job, hand this action `app-id` and `app-private-key` from that
+   environment's secrets, and change the workflow's `permissions` block
+   from `statuses: write` to **`statuses: read`** — not to nothing. The
+   sweep reads a head's own status history before every verdict, and a
+   `permissions` block that lists its other grants explicitly gives the
+   workflow token no `statuses` access at all once the line is deleted, so
+   the read 403s on a private repository and the App-authenticated write
+   is never reached. The action performs GitHub's own exchange itself
+   (sign a short-lived App JWT, look up this repository's installation,
+   mint a token from it), re-minting inside a loop long enough to outlive
+   one, and storing nothing; there is no token-minting step to add, and so
+   nothing extra for a consumer to pin or review. **The App token writes
+   the status and nothing else**: every read the sweep makes stays on the
+   workflow's own token, which is what lets the App keep commit statuses
+   as its only permission — step 1 above is not a simplification. Both
+   halves or neither: given one, the run fails rather than quietly falling
+   back to the workflow's token, which under a bound ruleset would leave
+   the gate waiting on a check nothing reports. The first sweep after the
+   credential is placed rewrites each open head's status even when its
+   verdict has not changed, so a head carrying one from anybody but this
+   App — `github-actions[bot]`, or an App rotated away from — gets one
+   from this App; otherwise binding the ruleset would block those pull
+   requests until their verdict changed. The comparison is against the
+   configured App by name, read from the installation lookup, so a
+   rotation migrates exactly as the first placement does.
 5. **In the ruleset, require the `codex` status from that App
    specifically**, not from any source. This is the step that closes the
    door; the previous four only make it possible.
