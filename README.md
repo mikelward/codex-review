@@ -219,6 +219,77 @@ runs and never appears among them. A state report assembled from fewer
 sources than that is a guess, and this file is the standing instruction not
 to make one.
 
+## Carrying the verdict across a generated push
+
+Some workflows write their own output back onto the branch — a screenshot
+job re-records its baselines and a downstream job commits the drift. That
+commit is a push, so Codex revokes its 👍 and re-reads a diff that changed
+by nothing it can read, and the gate waits for that re-read. The
+[lanes engine](https://github.com/mikelward/lanes)'s **generated lane**
+already settles the other half of that push: when a `synchronize` adds
+only files a `generated` rule names, made by an administrator or the App
+itself onto a head the App had vouched for, it publishes its green on the
+new head with a description naming the head it carried from.
+
+This action inherits Codex's verdict along the same claim. On a head whose
+newest `lanes-attest` or `lanes` status is that carried green, the sweep
+checks two things and publishes `Codex reviewed <sha>; verdict carried
+across generated files`:
+
+- **The claim is the engine's.** The status's creator must be an App —
+  never `github-actions[bot]`, which is the token any pull request's own
+  workflow holds — and, where the base branch's rules bind `lanes` to one
+  App, that App exactly (the ruleset names an integration id; the App's
+  public record joins it to the bot login). Where the rules bind `lanes` to
+  no App, no claim is trusted: any workflow holding `statuses: write` could
+  post one, so the carry is opt-in per repository — bind the required
+  `lanes` check to the App in the ruleset, and it starts carrying there.
+- **The named head is this pull request's, and so is its verdict.** A
+  status belongs to the commit, and a commit can have been another pull
+  request's head first, so the named head must be one of this pull
+  request's own commits, its `codex: success` must postdate the pull
+  request's creation and its latest retarget and predate the claim itself
+  (a claim vouches for the verdict that existed when the engine carried
+  it, not one earned on the same commit later), and a check suite born on
+  this pull request's own branch must record the named head reaching it
+  before the approval was written — the same server-stamped record the
+  sweep dates every head's arrival by, floored at the branch's last
+  force-push as that dating is and at the pull request's opening, and one
+  a fork head never has. And the verdict must say it was earned **by this
+  pull request**: every `codex: success` this action writes carries the
+  number of the pull request it judged, and it only ever writes on that
+  pull request's own head — so a success naming this number on the named
+  head is the record that the named head was this pull request's head when
+  the verdict was written. Nothing derived from timestamps could establish
+  that: a check suite is born some time *after* the push it belongs to, so
+  a verdict another pull request earned on the source inside that delay
+  passed every ordering test. A status written before this stamp existed
+  names no pull request and refuses, which the next verdict on that head
+  clears. Where
+  the rules bind `codex` itself to an App, the named head's `codex` status
+  must be that App's: any other writer's is one branch protection would
+  have refused, and carrying it would republish it under this action's
+  own name.
+- **Codex had approved the named head, and nothing has moved since.** Its
+  newest `codex` status must be `success`, and from that status onward no
+  finding on that head, no Codex comment on the pull request, and no owner
+  `@codex review` may stand unanswered — a clean verdict naming that head,
+  newer than all three, answers them, since the status itself does not move
+  when Codex re-reads and passes — a finding or a re-review ask that
+  landed between the last sweep and the push does not ride, and one in the
+  status's own second is a tie, which refuses as ties do everywhere here. A claim posted
+  before the pull request's latest retarget is refused too: the head stood
+  still through it while the reviewed diff changed.
+
+A carried verdict outranks a read in progress — Codex re-reading rendered
+images is the revocation this exists to survive — but not findings Codex
+leaves on the new head, an owner's `@codex review`, a hold, or a shared head,
+each of which is about *this* head. Every refusal is logged with its reason
+and the head takes the ordinary path, waiting for Codex's own answer exactly
+as before. The reads it adds — the base's rules, the App's record, the named
+head's combined status and the pull request's reviews — are paid only on a
+head carrying a claim, and the first two once per sweep.
+
 ## The ruleset this expects
 
 The status is only as strong as the rules that require it. The recommended

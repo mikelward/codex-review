@@ -639,7 +639,7 @@ export async function codexCommentSignals(api, { owner, name, number, since, hea
  * Returns null for a draft — nothing to gate until it is ready for review.
  */
 export function verdictFor({
-  isDraft, approved, sharedHead, held, reading, findings, nudged, unanswered,
+  isDraft, approved, sharedHead, held, reading, findings, nudged, unanswered, carried = null,
 }) {
   if (isDraft) return null;
 
@@ -666,6 +666,19 @@ export function verdictFor({
   // loop running through the review, which is the loop's whole point — a
   // `failure` here would idle the loop precisely while the next minute could
   // change the answer.
+  // A generated-only push carries the previous head's verdict: the lanes
+  // engine vouched that this head is the one before it plus files CI
+  // itself wrote back (see `carriedVerdict`), and Codex's answer on that
+  // head is what `carried` names. It outranks a read in progress on
+  // purpose -- Codex re-reading a diff of rendered images is the
+  // revocation-on-push this exists to survive, and holding the gate for it
+  // is the wait it exists to end -- but not findings Codex actually left on
+  // THIS head, nor a hold above or an owner's nudge, which are asks about
+  // this head that a verdict on the previous one cannot answer.
+  if (carried && !findings && !nudged) {
+    return { state: "success", description: `Codex reviewed ${carried}; verdict carried across generated files` };
+  }
+
   if (reading) return { state: "pending", description: PENDING };
 
   // The owner asked for another look, and the ask is newer than Codex's
@@ -707,6 +720,8 @@ query($owner:String!, $name:String!, $after:String) {
         isDraft
         headRefOid
         headRefName
+        baseRefName
+        createdAt
         isCrossRepository
         updatedAt
         commits(last:1) { nodes { commit { committedDate } } }
@@ -957,17 +972,348 @@ export function sharedHeads(prs) {
  */
 export async function codexStatuses(api, { owner, name, sha }) {
   const mine = [];
+  const lanes = [];
   let firstSeen = null;
   for (let page = 1; page <= 10; page += 1) {
     const batch = await api.rest(`/repos/${owner}/${name}/statuses/${sha}?per_page=100&page=${page}`);
     for (const s of batch ?? []) {
       if (s.context === CONTEXT) mine.push(s);
+      if (LANES_CONTEXTS.includes(s.context)) lanes.push(s);
       const t = utc(s.created_at);
       if (t && (firstSeen === null || t < firstSeen)) firstSeen = t;
     }
     if (!batch || batch.length < 100) break;
   }
-  return { mine, firstSeen };
+  return { mine, firstSeen, carrier: carriedClaim(lanes) };
+}
+
+// --- Carrying a verdict across a generated push ------------------------------
+
+/**
+ * The status contexts the lanes engine (mikelward/lanes) publishes, in the
+ * order a carried verdict is read from them: `lanes-attest` is the heavy
+ * jobs' verdict posted before any job that writes generated files back,
+ * `lanes` the required check itself. Newest per context wins, and the
+ * attestation outranks the required check because the required check on
+ * a head that is itself about to be pushed onto stays pending until that
+ * push is done.
+ */
+export const LANES_CONTEXTS = ["lanes-attest", "lanes"];
+
+/**
+ * How the lanes engine describes a verdict it carried forward: the push
+ * that made this head added only files a `generated` rule names, on top of
+ * a head the engine had already vouched for, and the description names
+ * that head. The wording is the engine's `describeVerdict`, matched at the
+ * start so the `[base <sha>]` marker it appends is not part of the claim.
+ */
+const CARRIED_RE = /^Generated-only push; verdict carried forward from ([0-9a-f]{7,40})\./;
+
+/**
+ * The bot a workflow's own token posts as. A pull request's own workflow
+ * under `pull_request` holds that token with whatever `statuses: write` it
+ * grants itself, so a status it posts is the forgery route the README's
+ * "Binding the status against collaborators" describes -- never a witness.
+ */
+const ACTIONS_BOT = "github-actions[bot]";
+
+/**
+ * What the newest lanes status on a head claims, or null: the short SHA of
+ * the head whose verdict it says it carried, and the status itself for the
+ * checks `carriedVerdict` still has to make. A status that is not green, or
+ * says anything but the carried-forward sentence, claims nothing -- a
+ * docs-only skip, a fresh verdict and a failure all take the ordinary path.
+ */
+export function carriedClaim(statuses) {
+  for (const context of LANES_CONTEXTS) {
+    // Newest first, as GitHub lists them; the first entry per context stands.
+    const status = (statuses ?? []).find((s) => s?.context === context);
+    if (!status) continue;
+    if (status.state !== "success") return null;
+    const m = CARRIED_RE.exec(status.description ?? "");
+    return m ? { from: m[1], status } : null;
+  }
+  return null;
+}
+
+/**
+ * The App each required check on a branch is bound to, context -> its
+ * integration id, with null for a check required from any source; a
+ * check not required at all is absent. `GET /rules/branches` reports the
+ * effective rules, repository and organization rulesets alike, and needs
+ * no permission beyond the token's own metadata read. One read per base
+ * per sweep answers for every context the carry asks about.
+ */
+export async function boundAppsFromRules(api, { owner, name, base }) {
+  const rules = await api.rest(`/repos/${owner}/${name}/rules/branches/${encodeURIComponent(base)}`);
+  const bound = new Map();
+  for (const rule of rules ?? []) {
+    if (rule?.type !== "required_status_checks") continue;
+    for (const check of rule.parameters?.required_status_checks ?? []) {
+      if (check?.context && !bound.has(check.context)) bound.set(check.context, check.integration_id ?? null);
+    }
+  }
+  return bound;
+}
+
+/**
+ * The integration id behind a status creator's bot login (`<slug>[bot]`),
+ * or null. A ruleset names an App by that id; `GET /apps/{slug}` is the
+ * public record joining the two. Cached by slug across a sweep, a failed
+ * read included, so every head asking about the same App gets the same
+ * answer without a second call.
+ */
+export function appIdOf(api, creator, cache) {
+  const slug = stripBot(creator?.login ?? "");
+  if (!slug) return Promise.resolve(null);
+  if (!cache.has(slug)) cache.set(slug, api.rest(`/apps/${encodeURIComponent(slug)}`).then((app) => app?.id ?? null));
+  return cache.get(slug);
+}
+
+/**
+ * The verdict this head inherits, as the short SHA of the head it was
+ * earned on, or null with the reason logged.
+ *
+ * The lanes engine already proved the hard part before it published the
+ * claim: the push was a `synchronize` whose range adds only paths a
+ * `generated` rule names, made by an administrator or the App itself, onto
+ * a head carrying the App's own green -- and it refuses the carry while the
+ * policy is under review. What is left to establish here is that the claim
+ * is the engine's and that Codex had in fact approved the head it names.
+ *
+ * - **The claim's author.** The context name proves nothing: any workflow
+ *   holding `statuses: write` can post a `lanes` status saying whatever it
+ *   likes, and a pull request's own workflow holds that token. So the
+ *   creator must be an App -- `type: Bot`, and never the workflow bot -- and
+ *   exactly the App the base branch's rules bind `lanes` to, matched
+ *   through its integration id. Where the rules bind it to no App, no
+ *   claim is trusted: the carry is opt-in per repository, by the ruleset
+ *   binding the required check to the App (maintainer, 2026-09-05).
+ * - **The claim's age.** A retarget changes the reviewed diff under an
+ *   unchanged head, and the ordinary path floors every signal at it; a
+ *   claim posted before the latest retarget vouches for the old diff and
+ *   is refused the same way.
+ * - **The verdict it names is this pull request's.** A status belongs to
+ *   the commit, and a commit can have been another pull request's head
+ *   first (the reused-head window in docs/CONSUMER.md), so the named head
+ *   must be one of this pull request's own commits, its `codex: success`
+ *   must postdate both the pull request's creation and its latest
+ *   retarget, and a check suite born on this pull request's own branch
+ *   must record the named head reaching that branch BEFORE the approval
+ *   was written -- the same server-stamped record `judge` dates a head's
+ *   arrival by, floored at the branch's last force-push as `judge` floors
+ *   it, so a suite from an earlier tenure of the branch is not tenure. Ancestry and overlap alone would still admit a verdict
+ *   another pull request earned on the same history, if this one were
+ *   later force-pushed onto its carried head.
+ * - **The verdict it names.** The newest `codex` status on the named head
+ *   must be `success` -- this action's own last word there -- and nothing
+ *   may have moved the answer since it was written: no Codex review of that
+ *   head, no Codex comment on the pull request, and no owner nudge, from
+ *   the status onward. A finding or a re-review ask that landed between
+ *   the last sweep and the push would otherwise ride the carry -- the
+ *   status predates it, and the new head's own walk starts at the new
+ *   head's birth, after it. The combined-status read returns the head's
+ *   full SHA, which the review's commit id is compared against.
+ *
+ * Every failure is a refusal with a logged reason, never a throw: the head
+ * then takes the ordinary path and waits for Codex's own answer, which is
+ * exactly what it did before this existed.
+ */
+/** Whether `sha` is one of the pull request's own commits (first 300). */
+export async function prHasCommit(api, { owner, name, number, sha }) {
+  for (let page = 1; page <= 3; page += 1) {
+    const batch = await api.rest(`/repos/${owner}/${name}/pulls/${number}/commits?per_page=100&page=${page}`);
+    if ((batch ?? []).some((c) => c?.sha === sha)) return true;
+    if (!batch || batch.length < 100) return false;
+  }
+  return false;
+}
+
+export async function carriedVerdict(api, {
+  owner, name, number, base, branch = null, head, carrier, createdAt = null, retargetedAt = null, movedAt = null,
+  cache, log,
+}) {
+  const { from, status } = carrier;
+  const refuse = (why) => {
+    log(`#${number}: lanes carries ${from} onto this head, but ${why} — not carrying Codex's verdict`);
+    return null;
+  };
+  // A tie is stale, as everywhere else: GitHub stamps to the second, and an
+  // unresolved order must not be what opens the gate.
+  const claimedAt = utc(status.created_at);
+  if (retargetedAt !== null && (claimedAt === null || claimedAt <= retargetedAt)) {
+    return refuse("the claim predates the pull request's latest retarget, so it vouches for another diff");
+  }
+  const creator = status.creator ?? {};
+  if (creator.type !== "Bot" || !creator.login || creator.login === ACTIONS_BOT) {
+    return refuse(`the claim was posted by ${JSON.stringify(creator.login ?? "")}, not by an App`);
+  }
+  if (!base) return refuse("the pull request names no base branch to read the rules of");
+  // Each read below refuses on failure rather than failing the head: a
+  // branch with no readable rules, an App with no public record, a short
+  // SHA GitHub cannot resolve are all "cannot establish the claim", and
+  // the head still has its ordinary path. The next sweep asks again.
+  if (!cache.rules.has(base)) cache.rules.set(base, boundAppsFromRules(api, { owner, name, base }));
+  let bound;
+  try {
+    bound = await cache.rules.get(base);
+  } catch (err) {
+    return refuse(`the rules for ${base} could not be read (${err.message})`);
+  }
+  const integrationId = bound.get("lanes") ?? null;
+  // The carry is opt-in per repository, by binding the required `lanes`
+  // check to the lanes App in the ruleset: where the rules bind it to no
+  // App, any workflow holding `statuses: write` could post the claim,
+  // and no claim is trusted (maintainer, 2026-09-05: carry only once the
+  // repository is hardened, one ruleset at a time).
+  if (integrationId === null) {
+    return refuse(`the rules for ${base} bind lanes to no App, so no claim is trusted there yet`);
+  }
+  let appId;
+  try {
+    appId = await appIdOf(api, creator, cache.apps);
+  } catch (err) {
+    return refuse(`the App behind ${creator.login} could not be read (${err.message})`);
+  }
+  if (appId !== integrationId) {
+    return refuse(`the rules for ${base} bind lanes to App ${integrationId}, which ${creator.login} is not`);
+  }
+  let combined;
+  try {
+    combined = await api.rest(`/repos/${owner}/${name}/commits/${from}/status`);
+  } catch (err) {
+    return refuse(`the status of ${from} could not be read (${err.message})`);
+  }
+  const codex = (combined?.statuses ?? []).find((s) => s?.context === CONTEXT);
+  if (!codex || codex.state !== "success") {
+    return refuse(`the codex status on ${from} is ${JSON.stringify(codex?.state ?? "absent")}, not success`);
+  }
+  const fullFrom = combined?.sha;
+  if (!fullFrom) return refuse(`the combined status for ${from} names no commit`);
+  // Where the rules bind `codex` to an App, the source status has to be
+  // that App's: any other writer's `codex: success` on the source is one
+  // branch protection would have refused, and carrying it would republish
+  // it under this action's own identity (Codex round 7). Unbound, the
+  // status is whatever writer the repository trusts for it -- this action
+  // itself, ordinarily.
+  const codexAppId = bound.get(CONTEXT) ?? null;
+  if (codexAppId !== null) {
+    const poster = codex.creator ?? {};
+    if (poster.type !== "Bot" || !poster.login) {
+      return refuse(`the codex status on ${from} was posted by ${JSON.stringify(poster.login ?? "")}, not by an App`);
+    }
+    let posterId;
+    try {
+      posterId = await appIdOf(api, poster, cache.apps);
+    } catch (err) {
+      return refuse(`the App behind ${poster.login} could not be read (${err.message})`);
+    }
+    if (posterId !== codexAppId) {
+      return refuse(`the rules for ${base} bind codex to App ${codexAppId}, which ${poster.login} is not`);
+    }
+  }
+  // And it has to be THIS pull request's verdict, said so by the writer
+  // rather than inferred from the clock. `publish` stamps every success
+  // with the number of the pull request it was earned by, and only ever
+  // writes on that pull request's own head -- so a success naming this
+  // number on the source is the record that the source was this pull
+  // request's head when it was written, which no timestamp bound could
+  // establish (Codex round 9: a check suite's birth is a delayed record of
+  // the push, so a verdict another pull request earned on the source in
+  // that delay satisfied every ordering test).
+  const earnedBy = stampedNumber(codex.description);
+  if (earnedBy !== number) {
+    return refuse(
+      earnedBy === null
+        ? `the codex status on ${from} names no pull request, so it cannot be told from one another pull request earned`
+        : `the codex status on ${from} was earned by #${earnedBy}, not this pull request`,
+    );
+  }
+  // The bound is the second BEFORE the status: both readers below drop a
+  // signal stamped equal to their bound, and GitHub stamps to the second,
+  // so a finding or a nudge in the status's own second would otherwise
+  // vanish between this walk and the new head's, which starts after the
+  // push. A tie is an unresolved order, and ambiguity must not be what
+  // opens the gate -- the same rule the retarget and nudge ties follow.
+  const approvedAt = utc(codex.created_at);
+  const approvedMs = approvedAt === null ? NaN : Date.parse(approvedAt);
+  if (Number.isNaN(approvedMs)) return refuse(`the codex status on ${from} carries no readable time`);
+  // The verdict has to be THIS pull request's: earned after it was opened
+  // and after its latest retarget, on a commit that is its own. A status
+  // belongs to the commit, so one earned while the commit was another
+  // pull request's head, or under another base, would otherwise ride.
+  const openedAt = utc(createdAt);
+  if (openedAt === null) return refuse("the pull request's creation time is unknown");
+  if (approvedAt <= openedAt) return refuse(`${from} was approved before this pull request was opened`);
+  if (retargetedAt !== null && approvedAt <= retargetedAt) {
+    return refuse(`${from} was approved before this pull request's latest retarget`);
+  }
+  // And before the claim was posted: the claim vouches for a verdict that
+  // existed when the engine carried it, not one another pull request
+  // earned on the same commit later. A tie is an unresolved order.
+  if (claimedAt === null || approvedAt >= claimedAt) {
+    return refuse(`${from} was approved at or after the claim was posted, so the claim carried no verdict`);
+  }
+  if (!(await prHasCommit(api, { owner, name, number, sha: fullFrom }))) {
+    return refuse(`${from} is not one of this pull request's commits`);
+  }
+  // Ancestry and overlap are not tenure: this pull request could have been
+  // force-pushed onto a head another pull request earned the carry on. A
+  // suite born on THIS branch for the named head is the server's record
+  // that it was this branch's head, and it has to predate the approval.
+  // A fork head has no branch-born suite, and fails closed here exactly
+  // as its 👍 does in `judge`. Floored at the branch's last force-push
+  // for the reason `judge` floors every birth there: a suite from an
+  // earlier tenure of the branch -- the named head pushed, moved away
+  // from, approved as another pull request's head, then force-pushed
+  // back onto -- would otherwise predate a foreign approval and vouch for
+  // it; the re-arrival's own suite postdates it and does not. Floored at
+  // the pull request's opening as well: `movedAt` records force-pushes,
+  // and a branch that held the named head before this pull request
+  // existed, then opened on an ancestor and fast-forwarded back, moved
+  // by no force-push at all -- its pre-opening suite would vouch the
+  // same way.
+  if (!branch) return refuse("the pull request names no head branch to date the named head's tenure by");
+  const tenure = await checkSuiteBirths(api, {
+    owner, name, sha: fullFrom, branch, since: laterOf(movedAt, openedAt),
+  });
+  if (tenure.forBranch === null || tenure.forBranch >= approvedAt) {
+    return refuse(`no check suite records ${from} on this pull request's branch before it was approved`);
+  }
+  // What used to stand here -- this head's own arrival on the branch having
+  // to postdate the approval -- is gone, and the stamp above replaced it.
+  // It was reaching for the same fact and could not prove it: a check
+  // suite is born some time AFTER the push it belongs to (this file says so
+  // itself, in `judge`), so a verdict another pull request earned on the
+  // source inside that delay passed the test. The stamp settles by record
+  // what the ordering could only guess at, and costs a read fewer.
+  const beforeApproval = new Date(approvedMs - 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  // Everything said about the named head since its status: findings in the
+  // review streams, the owner's nudge, and Codex's word in either comment
+  // stream -- against the newest clean verdict naming that head. The status
+  // itself does not move when Codex re-reads and passes (`publish` leaves
+  // an identical success alone), so the newest word is what says whether an
+  // objection still stands, exactly as the ordinary path weighs them; a
+  // nudge Codex has already answered would otherwise cost the carry and
+  // buy a redundant re-review (Codex round 8). A tie refuses, as ties do
+  // everywhere here.
+  const said = await codexCommentSignals(api, {
+    owner, name, number, since: beforeApproval, head: fullFrom,
+  });
+  const reviewed = await codexReviewedAt(api, {
+    owner, name, number, headRefOid: fullFrom, since: beforeApproval,
+  });
+  const objection = laterOf(said.nudgeAt, said.codexAt, reviewed);
+  if (objection !== null && (said.cleanAt === null || said.cleanAt <= objection)) {
+    const what =
+      objection === reviewed
+        ? `Codex left findings on ${from} after that status was written`
+        : objection === said.nudgeAt
+          ? `the owner asked for a re-review after ${from} was approved`
+          : `Codex commented on the pull request after ${from} was approved`;
+    return refuse(said.cleanAt === null ? what : `${what}, and no clean verdict has answered it since`);
+  }
+  return from.slice(0, 7);
 }
 
 /**
@@ -1026,19 +1372,52 @@ export async function checkSuiteBirths(api, { owner, name, sha, branch, since })
 }
 
 /** Write the status unless an identical one is already on the head. */
+/**
+ * The pull request a `success` was earned by, appended to its description.
+ *
+ * A status belongs to the COMMIT, and says nothing about which pull request
+ * earned it -- which is the whole difficulty the carry kept running into:
+ * three rounds of review (6, 7 and 9) each bounded the source approval by
+ * another timestamp, trying to establish from the outside what the writer
+ * knew all along. This records it instead.
+ *
+ * Sound because of where the write happens: this action only ever posts to
+ * `pr.headRefOid`, so a success naming #N on commit S is the server's
+ * record that S was #N's head when it was written. No other pull request's
+ * verdict can wear this mark, and no clock has to be trusted to tell them
+ * apart.
+ *
+ * Only a success is stamped. `pending` and `failure` descriptions are read
+ * back by the parked-marker and findings checks, which match on exact
+ * strings, and neither is ever carried.
+ */
+export function stamp(description, number) {
+  return `${description} (#${number})`;
+}
+
+/**
+ * The pull request number a stamped description names, or null.
+ */
+export function stampedNumber(description) {
+  const m = /\(#(\d+)\)$/.exec(String(description ?? ""));
+  return m ? Number(m[1]) : null;
+}
+
 export async function publish(api, { owner, name, pr, verdict, current, log }) {
+  const description =
+    verdict.state === "success" ? stamp(verdict.description, pr.number) : verdict.description;
   // Every write shows up in the PR's check list, and a five-minute cadence
   // would otherwise bury it. It also keeps the marker still: rewriting the
   // same status would move the head's earliest-gated timestamp forward.
-  if (current?.state === verdict.state && current?.description === verdict.description) {
+  if (current?.state === verdict.state && current?.description === description) {
     log(`#${pr.number}: ${verdict.state} (unchanged)`);
     return false;
   }
   await api.rest(`/repos/${owner}/${name}/statuses/${pr.headRefOid}`, {
     method: "POST",
-    body: { context: CONTEXT, state: verdict.state, description: verdict.description },
+    body: { context: CONTEXT, state: verdict.state, description },
   });
-  log(`#${pr.number}: ${verdict.state} — ${verdict.description}`);
+  log(`#${pr.number}: ${verdict.state} — ${description}`);
   return true;
 }
 
@@ -1064,6 +1443,10 @@ export async function sweep({
 
   const shared = sharedHeads(open);
   let awaiting = 0;
+  // Read once per sweep: the App a base branch's rules bind `lanes` to, and
+  // each App slug's integration id. Both are paid only on a head that
+  // carries a claim.
+  const carryCache = { rules: new Map(), apps: new Map() };
 
   // Judge one head; returns 1 if it is still awaiting Codex's answer.
   async function judge(node) {
@@ -1071,7 +1454,7 @@ export async function sweep({
     // Read the head's status history first: its earliest entry, whatever
     // the context, is what a reaction has to be newer than — so this has to
     // happen before the reactions are judged rather than at write time.
-    const { mine, firstSeen } = await codexStatuses(api, { owner, name, sha: node.headRefOid });
+    const { mine, firstSeen, carrier } = await codexStatuses(api, { owner, name, sha: node.headRefOid });
     // When this SHA became this PR's head. A push can move the PR onto a
     // commit that already existed — whose statuses and check suites date
     // from its FIRST life, before the previous head's 👍. A force-push
@@ -1207,13 +1590,24 @@ export async function sweep({
       }
     }
     const { approved, approvedAt, held, reading } = seen;
+    // A generated-only push onto an approved head inherits that approval;
+    // read only once the lanes engine has published the claim, and never
+    // for a shared head, which fails closed above whatever it inherits.
+    const carried = carrier && !sharedHead && !held
+      ? await carriedVerdict(api, {
+        owner, name, number: node.number, base: node.baseRefName, branch: node.headRefName,
+        head: node.headRefOid, carrier, createdAt: node.createdAt, retargetedAt, movedAt, cache: carryCache, log,
+      })
+      : null;
     // The finding and nudge streams are fetched whenever they could change
     // the answer. That includes an APPROVED head: an owner nudge newer than
     // the 👍 must reopen the wait, or auto-merge honors a verdict the owner
     // has already asked to be redone. Only a shared head, a hold, and a
     // read in progress settle without the walk; the `since` bound keeps it
-    // to a page in practice.
-    const undecided = !sharedHead && !held && !reading;
+    // to a page in practice. A carried verdict outranks the read, so a head
+    // carrying one walks through it: the nudge or finding that would hold
+    // the carry back has to be seen to hold it.
+    const undecided = !sharedHead && !held && (!reading || Boolean(carried));
     // Seeded from the reaction so the settle-without-the-walk paths below
     // (shared head, hold, read in progress) carry the same value they always
     // did; the walk can only add an attributable clean comment to it.
@@ -1311,7 +1705,7 @@ export async function sweep({
     const parkStands = parkedAt !== null && (nudgeAt === null || parkedAt > nudgeAt);
     const verdict = verdictFor({
       isDraft: false, approved: cleanlyApproved, sharedHead, held, reading,
-      findings, nudged: nudged && !parkStands,
+      findings, nudged: nudged && !parkStands, carried,
       // Read back off the head rather than recomputed: see UNANSWERED for
       // why this has to be sticky. Everything that should clear it -- a
       // nudge, a push, an answer -- outranks it in `verdictFor` or arrives

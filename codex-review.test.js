@@ -1,6 +1,7 @@
 import { describe, it, expect } from "./vitest-shim.mjs";
 import {
   verdictFor,
+  carriedClaim,
   runLoop,
   PENDING,
   FINDINGS,
@@ -107,6 +108,68 @@ describe("verdictFor", () => {
 
   it("skips drafts", () => {
     expect(verdictFor({ isDraft: true, approved: true })).toBeNull();
+  });
+
+  it("carries the previous head's verdict across a generated push", () => {
+    // The lanes engine vouched that this head is the previous one plus the
+    // files CI wrote back; Codex's answer there is the answer here.
+    expect(verdictFor({ carried: "abc1234" })).toEqual({
+      state: "success",
+      description: "Codex reviewed abc1234; verdict carried across generated files",
+    });
+  });
+
+  it("lets a carried verdict outrank a read in progress", () => {
+    // Codex re-reading rendered images is the revocation the carry exists
+    // to survive; waiting for it is the wait it exists to end.
+    expect(verdictFor({ carried: "abc1234", reading: true }).state).toBe("success");
+  });
+
+  it("holds a carried verdict below findings, a nudge, a hold and a shared head", () => {
+    // Each is about THIS head, which a verdict on the previous one cannot
+    // answer.
+    expect(verdictFor({ carried: "abc1234", findings: true })).toEqual({
+      state: "pending",
+      description: FINDINGS,
+    });
+    expect(verdictFor({ carried: "abc1234", nudged: true }).state).toBe("pending");
+    expect(verdictFor({ carried: "abc1234", held: "👎" }).state).toBe("failure");
+    expect(verdictFor({ carried: "abc1234", sharedHead: true }).state).toBe("failure");
+    expect(verdictFor({ carried: "abc1234", isDraft: true })).toBeNull();
+  });
+});
+
+describe("carriedClaim", () => {
+  const lanes = (over = {}) => ({
+    context: "lanes",
+    state: "success",
+    description: "Generated-only push; verdict carried forward from abc1234. [base 0beef12]",
+    creator: { login: "lanes-app[bot]", type: "Bot" },
+    ...over,
+  });
+
+  it("reads the carried head off the engine's own wording", () => {
+    expect(carriedClaim([lanes()]).from).toBe("abc1234");
+  });
+
+  it("claims nothing for a fresh verdict, a docs skip or a failure", () => {
+    expect(carriedClaim([lanes({ description: "Every required job passed. [base 0beef12]" })])).toBeNull();
+    expect(carriedClaim([lanes({ description: "Documentation-only diff; the heavy jobs were skipped." })])).toBeNull();
+    expect(carriedClaim([lanes({ state: "pending" })])).toBeNull();
+    expect(carriedClaim([lanes({ state: "failure" })])).toBeNull();
+    expect(carriedClaim([])).toBeNull();
+    expect(carriedClaim(null)).toBeNull();
+  });
+
+  it("reads the attestation before the required check, and the newest of each", () => {
+    // The attestation is the heavy jobs' verdict posted before the push
+    // that writes generated files; `lanes` itself still says pending then.
+    const attest = lanes({ context: "lanes-attest", description: "Generated-only push; verdict carried forward from 1111111. [base 0beef12]" });
+    expect(carriedClaim([lanes({ state: "pending" }), attest]).from).toBe("1111111");
+    // Newest first, so an older carried entry under a fresh code verdict is
+    // not the claim.
+    const fresh = lanes({ description: "Every required job passed. [base 0beef12]" });
+    expect(carriedClaim([fresh, lanes()])).toBeNull();
   });
 });
 
@@ -532,6 +595,7 @@ const prNode = (over = {}) => ({
   isDraft: false,
   headRefOid: "abc1234",
   headRefName: "claude/topic",
+  createdAt: "2026-08-14T10:00:00Z",
   isCrossRepository: false,
   updatedAt: GATED_AT,
   commits: { nodes: [{ commit: { committedDate: BORN_AT } }] },
@@ -574,10 +638,14 @@ const hold = (content = "THUMBS_DOWN", login = OWNER) => ({
 // returns them. A GET on the statuses path reads them; a POST writes one.
 // `issueComments` maps a PR number to REST-shaped comments; the fake honors
 // paging but not `since` — the code under test re-filters by created_at.
+// `branchRules` is what `GET /rules/branches/<base>` returns; `apps` maps
+// an App slug to its record; `combined` maps a ref to its combined status
+// (`GET /commits/<ref>/status`), the one read that resolves a short SHA.
 function fakeFetch({
   graphqlResponses = [], statuses = {}, issueComments = {}, prReviews = {},
   reviewThreadComments = {}, checkSuites = {}, issueReactions = {},
   failStatusWrite = false, failComments = false,
+  branchRules = null, apps = {}, combined = {}, prCommits = {},
 } = {}) {
   const calls = [];
   const queue = [...graphqlResponses];
@@ -590,6 +658,29 @@ function fakeFetch({
       const data = queue.shift();
       if (!data) throw new Error("unexpected extra graphql call");
       return { ok: true, status: 200, json: async () => (data.errors ? data : { data }) };
+    }
+    if (/\/pulls\/\d+\/commits/.test(path)) {
+      const number = path.split("/pulls/")[1].split("/")[0];
+      const page = Number(new URLSearchParams(path.split("?")[1] ?? "").get("page") ?? 1);
+      const all = prCommits[number] ?? [];
+      return { ok: true, status: 200, json: async () => all.slice((page - 1) * 100, page * 100) };
+    }
+    if (path.includes("/rules/branches/")) {
+      if (branchRules === null) throw new Error(`unexpected rules read ${path}`);
+      return { ok: true, status: 200, json: async () => branchRules };
+    }
+    if (path.startsWith("/apps/")) {
+      const app = apps[path.slice("/apps/".length)];
+      return app
+        ? { ok: true, status: 200, json: async () => app }
+        : { ok: false, status: 404, json: async () => ({}) };
+    }
+    if (/\/commits\/[^/]+\/status$/.test(path)) {
+      const ref = path.split("/commits/")[1].split("/")[0];
+      const c = combined[ref];
+      return c
+        ? { ok: true, status: 200, json: async () => c }
+        : { ok: false, status: 404, json: async () => ({}) };
     }
     if (path.includes("/check-suites")) {
       const sha = path.split("/commits/")[1].split("/")[0];
@@ -668,6 +759,48 @@ describe("sweep", () => {
       graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
     });
     expect((await run(fake))[0].state).toBe("success");
+  });
+
+  it("stamps a success with the pull request that earned it", async () => {
+    // A status belongs to the COMMIT and says nothing about which pull
+    // request earned it, which is what the carry could never establish
+    // from the outside. The writer knows, so it records it: this action
+    // only ever writes on the pull request's own head, so a success naming
+    // #N on a commit is the record that the commit was #N's head when it
+    // was written (Codex round 9).
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      checkSuites: { abc1234: [bornSuite()] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+    });
+    expect((await run(fake))[0].state).toBe("success");
+    const write = fake.calls.find((c) => c.method === "POST" && c.path.includes("/statuses/"));
+    expect(write.body.description).toBe("Codex reviewed this head, no findings (#1)");
+    // And read back: an identical stamped status is not rewritten, so the
+    // stamp does not cost a write on every sweep.
+    const again = fakeFetch({
+      statuses: { abc1234: [gate("2026-08-14T12:05:00Z", "success", "Codex reviewed this head, no findings (#1)")] },
+      checkSuites: { abc1234: [bornSuite()] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+    });
+    expect(await run(again)).toEqual([]);
+  });
+
+  it("leaves pending and failure descriptions unstamped", async () => {
+    // Both are read back by exact string -- the parked marker, the
+    // findings check -- and neither is ever carried, so neither is
+    // stamped.
+    const pending = fakeFetch({ graphqlResponses: [repoPRs([prNode()])] });
+    await run(pending);
+    const first = pending.calls.find((c) => c.method === "POST" && c.path.includes("/statuses/"));
+    expect(first.body.description).toBe(PENDING);
+    const shared = fakeFetch({
+      graphqlResponses: [repoPRs([prNode(), prNode({ number: 2 })])],
+    });
+    await run(shared);
+    const write = shared.calls.find((c) => c.method === "POST" && c.path.includes("/statuses/"));
+    expect(write.body.state).toBe("failure");
+    expect(write.body.description.includes("(#")).toBe(false);
   });
 
   it("verifies a bare-login 👍 against REST before approving", async () => {
@@ -2396,6 +2529,457 @@ describe("sweep", () => {
     // Touched (a comment landed): judged on the very next sweep.
     const touched = await sweepAt("2026-08-14T12:20:00Z");
     expect(touched.calls.some((c) => c.path.includes("/statuses/"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A generated-only push: the lanes engine has published a green on the head
+// saying it carried the previous head's verdict, and the sweep inherits
+// Codex's answer on that head rather than waiting for a re-read of files CI
+// wrote back.
+
+const FROM = "aaa1111";
+const FROM_FULL = "aaa1111000000000000000000000000000000000";
+const LANES_APP = { login: "lanes-app[bot]", type: "Bot" };
+const CARRIED = `Codex reviewed ${FROM}; verdict carried across generated files`;
+// The engine's own wording, with the base marker it appends.
+const lanesCarry = (over = {}) => ({
+  context: "lanes",
+  state: "success",
+  description: `Generated-only push; verdict carried forward from ${FROM}. [base 0beef12]`,
+  creator: LANES_APP,
+  created_at: AFTER,
+  ...over,
+});
+// The base branch's effective rules, binding `lanes` to App 42.
+const bindLanesTo = (integration_id) => [{
+  type: "required_status_checks",
+  parameters: { required_status_checks: [{ context: "lanes", integration_id }, { context: "codex" }] },
+}];
+// The named head's combined status: this action's own last word there.
+// `publish` stamps every success with the pull request that earned it, and
+// the carry reads that stamp back: the fixture's source verdict was earned
+// by #1, the pull request every carry test carries onto.
+const earnedBy = (number) => `Codex reviewed this head, no findings (#${number})`;
+const fromStatus = (state = "success", created_at = BEFORE, creator = undefined, description = earnedBy(1)) => ({
+  [FROM]: {
+    sha: FROM_FULL,
+    statuses: [{ context: CONTEXT, state, created_at, description, ...(creator ? { creator } : {}) }],
+  },
+});
+// The named head's tenure on the branch, and this head's own arrival there
+// after the approval: the two suites every carry needs.
+const SOURCE_SUITE = bornSuite("2026-08-14T10:30:00Z", "claude/topic");
+const HEAD_SUITE = { abc1234: [bornSuite("2026-08-14T11:30:00Z", "claude/topic")] };
+// The claim posted later than AFTER, for cases whose source approval is
+// stamped AFTER: a claim tied with the approval refuses on its own, and
+// this head has to arrive after that approval too.
+const claimedLater = {
+  statuses: { abc1234: [gate(), lanesCarry({ created_at: "2026-08-14T12:10:00Z" })] },
+  checkSuites: { [FROM_FULL]: [SOURCE_SUITE], abc1234: [bornSuite("2026-08-14T12:07:00Z", "claude/topic")] },
+};
+const carryFake = (over = {}) => fakeFetch({
+  statuses: { abc1234: [gate(), lanesCarry()] },
+  branchRules: bindLanesTo(42),
+  apps: { "lanes-app": { id: 42, slug: "lanes-app" } },
+  combined: fromStatus(),
+  prCommits: { 1: [{ sha: FROM_FULL }, { sha: "abc1234" }], 2: [{ sha: FROM_FULL }, { sha: "def5678" }] },
+  // The named head reached this branch before it was approved, and this
+  // head after.
+  checkSuites: { [FROM_FULL]: [SOURCE_SUITE], ...HEAD_SUITE },
+  graphqlResponses: [repoPRs([prNode({ baseRefName: "main" })])],
+  ...over,
+});
+
+// The head's standing `codex` status is PENDING, so a refused carry writes
+// nothing at all: "not carried" is the absence of a success write.
+// A refusal, never a failed head: the reason is logged and the head keeps
+// its ordinary path.
+const notCarried = async (fake) => {
+  const { written, failed } = await runFull(fake);
+  expect(failed).toEqual([]);
+  expect(written.filter((w) => w.state === "success")).toEqual([]);
+  return written;
+};
+
+describe("sweep, carrying a verdict across a generated push", () => {
+  it("carries Codex's verdict onto a head the lanes App vouched for", async () => {
+    const fake = carryFake();
+    expect((await run(fake))[0]).toEqual({ number: 1, state: "success", description: CARRIED });
+    // Read in that order: the base's rules, the App behind the claim, the
+    // named head's own status — then the reviews of that head and both
+    // comment streams from that status on, so nothing that landed after it
+    // can ride the carry.
+    const paths = fake.calls.map((c) => c.path);
+    expect(paths).toContain("/repos/o/r/rules/branches/main");
+    expect(paths).toContain("/apps/lanes-app");
+    expect(paths).toContain(`/repos/o/r/commits/${FROM}/status`);
+    expect(paths.some((p) => p.includes("/pulls/1/commits"))).toBe(true);
+    expect(paths.some((p) => p.includes(`/commits/${FROM_FULL}/check-suites`))).toBe(true);
+    // Only the NAMED head's suites: this head's own arrival is no longer
+    // read, since the stamp on the source status says which pull request
+    // earned it and a suite's birth never could.
+    expect(paths.some((p) => p.includes("/commits/abc1234/check-suites"))).toBe(false);
+    expect(paths.some((p) => p.includes("/pulls/1/reviews"))).toBe(true);
+    // The walk's bound is the second before the status, so a tie is seen.
+    const bound = encodeURIComponent("2026-08-14T10:59:59Z");
+    expect(paths.some((p) => p.includes(`/issues/1/comments?since=${bound}`))).toBe(true);
+    expect(paths.some((p) => p.includes(`/pulls/1/comments?since=${bound}`))).toBe(true);
+  });
+
+  it("reads nothing extra for a head whose lanes verdict is its own", async () => {
+    // A fresh green, a docs skip, a pending: none is a claim, so none costs
+    // a rules read — and the head takes the ordinary path.
+    const fake = carryFake({
+      statuses: { abc1234: [gate(), lanesCarry({ description: "Every required job passed. [base 0beef12]" })] },
+    });
+    expect(await notCarried(fake)).toEqual([]);
+    expect(fake.calls.some((c) => c.path.includes("/rules/") || c.path.startsWith("/apps/") || c.path.endsWith("/status"))).toBe(false);
+  });
+
+  it("refuses a claim posted by the workflow bot", async () => {
+    // Any pull request's own workflow can post a `lanes` status with that
+    // token; the claim has to come from an App.
+    const fake = carryFake({
+      statuses: { abc1234: [gate(), lanesCarry({ creator: { login: "github-actions[bot]", type: "Bot" } })] },
+    });
+    await notCarried(fake);
+    expect(fake.calls.some((c) => c.path.includes("/rules/"))).toBe(false);
+    const human = carryFake({
+      statuses: { abc1234: [gate(), lanesCarry({ creator: { login: "someone", type: "User" } })] },
+    });
+    await notCarried(human);
+  });
+
+  it("refuses a claim from an App other than the one the base's rules bind lanes to", async () => {
+    const fake = carryFake({ apps: { "lanes-app": { id: 43 } } });
+    await notCarried(fake);
+    // The claim's author is settled before anything about the named head is read.
+    expect(fake.calls.some((c) => c.path.endsWith("/status"))).toBe(false);
+    const unknown = carryFake({ apps: {} });
+    await notCarried(unknown);
+  });
+
+  it("refuses every claim where the rules bind lanes to no App", async () => {
+    // The carry is opt-in per repository, by the ruleset binding the
+    // required check to the App: until then any workflow with
+    // `statuses: write` could post the claim, so none is trusted, and the
+    // App behind the claim is never even read.
+    const fake = carryFake({ branchRules: [] });
+    await notCarried(fake);
+    expect(fake.calls.some((c) => c.path.startsWith("/apps/"))).toBe(false);
+    await notCarried(carryFake({ branchRules: bindLanesTo(undefined) }));
+  });
+
+  it("logs why a carry was refused", async () => {
+    const lines = [];
+    const fake = carryFake({ combined: {} });
+    await sweep({ owner: OWNER, name: "r", token: "t", fetchImpl: fake.impl, log: (l) => lines.push(l), now: TEST_NOW });
+    expect(lines.some((l) => l.includes(`lanes carries ${FROM}`) && l.includes("not carrying"))).toBe(true);
+  });
+
+  it("binds the carried verdict to this pull request", async () => {
+    // A status belongs to the commit, which may have been another pull
+    // request's head first: the verdict has to name this pull request,
+    // postdate its creation and latest retarget, and sit on one of its
+    // own commits.
+    const opened = carryFake({
+      graphqlResponses: [repoPRs([prNode({ baseRefName: "main", createdAt: AFTER })])],
+    });
+    await notCarried(opened);
+    const tied = carryFake({
+      graphqlResponses: [repoPRs([prNode({ baseRefName: "main", createdAt: BEFORE })])],
+    });
+    await notCarried(tied);
+    const unknown = carryFake({
+      graphqlResponses: [repoPRs([prNode({ baseRefName: "main", createdAt: undefined })])],
+    });
+    await notCarried(unknown);
+    // Retargeted after the source verdict, though before the claim.
+    const retargeted = carryFake({
+      graphqlResponses: [repoPRs([prNode({
+        baseRefName: "main",
+        retargets: page([{ createdAt: "2026-08-14T11:30:00Z" }]),
+      })])],
+    });
+    await notCarried(retargeted);
+    // Not one of this pull request's commits.
+    const foreign = carryFake({ prCommits: { 1: [{ sha: "abc1234" }] } });
+    await notCarried(foreign);
+    // Its commit, but never recorded as this branch's head before the
+    // approval: no suite, a suite on another branch, one born after.
+    await notCarried(carryFake({ checkSuites: {} }));
+    await notCarried(carryFake({ checkSuites: { ...HEAD_SUITE, [FROM_FULL]: [bornSuite("2026-08-14T10:30:00Z", "other")] } }));
+    await notCarried(carryFake({ checkSuites: { ...HEAD_SUITE, [FROM_FULL]: [bornSuite(AFTER, "claude/topic")] } }));
+    await notCarried(carryFake({ checkSuites: { ...HEAD_SUITE, [FROM_FULL]: [bornSuite(BEFORE, "claude/topic")] } }));
+    // A suite from an earlier tenure of the branch is not tenure: the
+    // lookup is floored at the branch's last force-push, as `judge` floors
+    // every birth, so the re-arrival's own suite is what has to predate
+    // the approval.
+    const forced = (createdAt) => ({ forcePushes: page([{ createdAt }]) });
+    await notCarried(carryFake({
+      graphqlResponses: [repoPRs([prNode({ baseRefName: "main", ...forced("2026-08-14T10:45:00Z") })])],
+    }));
+    const returned = carryFake({
+      graphqlResponses: [repoPRs([prNode({ baseRefName: "main", ...forced("2026-08-14T10:45:00Z") })])],
+      checkSuites: { ...HEAD_SUITE, [FROM_FULL]: [
+        bornSuite("2026-08-14T10:30:00Z", "claude/topic"),
+        bornSuite("2026-08-14T10:50:00Z", "claude/topic"),
+      ] },
+    });
+    expect((await run(returned))[0].state).toBe("success");
+    // And earned by THIS pull request, which the source status says of
+    // itself: `publish` stamps every success with the number, and only
+    // ever writes on that pull request's own head. Another pull request's
+    // stamp, and an unstamped status from before this was recorded, both
+    // refuse -- the second fail-closed, since nothing distinguishes it.
+    await notCarried(carryFake({ combined: fromStatus("success", BEFORE, undefined, earnedBy(2)) }));
+    await notCarried(carryFake({ combined: fromStatus("success", BEFORE, undefined, "Codex reviewed this head, no findings") }));
+    await notCarried(carryFake({ combined: fromStatus("success", BEFORE, undefined, null) }));
+    // This head's arrival is NOT read any more: a check suite is born after
+    // the push it belongs to, so its birth could never prove the approval
+    // came first -- the stamp does, by record (Codex round 9).
+    const noHeadSuite = carryFake({ checkSuites: { [FROM_FULL]: [SOURCE_SUITE] } });
+    expect((await run(noHeadSuite))[0].state).toBe("success");
+    // Floored at the pull request's opening too: a suite from before it
+    // opened (the branch held the named head, opened on an ancestor, and
+    // fast-forwarded back -- no force-push to floor at) is not tenure.
+    await notCarried(carryFake({ checkSuites: { ...HEAD_SUITE, [FROM_FULL]: [bornSuite("2026-08-14T09:30:00Z", "claude/topic")] } }));
+    // A fork head has no branch-born suite and fails closed here too.
+    await notCarried(carryFake({
+      graphqlResponses: [repoPRs([prNode({ baseRefName: "main", headRefName: null })])],
+    }));
+    // On a later page of a long pull request, still its own.
+    const long = carryFake({
+      prCommits: { 1: [...Array.from({ length: 100 }, (_, i) => ({ sha: `c${i}` })), { sha: FROM_FULL }] },
+    });
+    expect((await run(long))[0].state).toBe("success");
+  });
+
+  it("holds the source status to the App the rules bind codex to", async () => {
+    // A forged `codex: success` on the source, from a writer branch
+    // protection would refuse, must not be republished under this action's
+    // own identity.
+    const both = [{
+      type: "required_status_checks",
+      parameters: { required_status_checks: [{ context: "lanes", integration_id: 42 }, { context: CONTEXT, integration_id: 15368 }] },
+    }];
+    const actions = { login: "github-actions[bot]", type: "Bot" };
+    const apps = { "lanes-app": { id: 42, slug: "lanes-app" }, "github-actions": { id: 15368, slug: "github-actions" }, other: { id: 7 } };
+    const genuine = carryFake({ branchRules: both, apps, combined: fromStatus("success", BEFORE, actions) });
+    expect((await run(genuine))[0].state).toBe("success");
+    await notCarried(carryFake({ branchRules: both, apps, combined: fromStatus("success", BEFORE, { login: "other[bot]", type: "Bot" }) }));
+    await notCarried(carryFake({ branchRules: both, apps, combined: fromStatus("success", BEFORE, { login: "someone", type: "User" }) }));
+    await notCarried(carryFake({ branchRules: both, apps, combined: fromStatus() }));
+    // Unbound, the status is whichever writer the repository trusts for it.
+    expect((await run(carryFake({ combined: fromStatus("success", BEFORE, { login: "someone", type: "User" }) })))[0].state).toBe("success");
+  });
+
+  it("refuses a source approval posted at or after the claim", async () => {
+    // The claim vouches for the verdict that existed when it was posted;
+    // one another pull request earned on the same commit later does not
+    // ride it, and a tie is an unresolved order.
+    await notCarried(carryFake({ combined: fromStatus("success", "2026-08-14T12:10:00Z") }));
+    await notCarried(carryFake({ combined: fromStatus("success", AFTER) }));
+  });
+
+  it("refuses when the named head was never approved", async () => {
+    await notCarried(carryFake({ combined: fromStatus("pending") }));
+    await notCarried(carryFake({ combined: {} }));
+    const bare = carryFake({ combined: { [FROM]: { sha: FROM_FULL, statuses: [] } } });
+    await notCarried(bare);
+  });
+
+  it("refuses when Codex reviewed the named head after its status was written", async () => {
+    // The status was this action's last word before the push; a finding
+    // between the two must not ride the carry.
+    const fake = carryFake({ prReviews: { 1: [review(FROM_FULL, `${CODEX_BOT}[bot]`, AFTER)] } });
+    await notCarried(fake);
+    // A review in the status's own second is an unresolved order, and a
+    // tie is stale here as everywhere else.
+    const tied = carryFake({
+      ...claimedLater,
+      combined: fromStatus("success", AFTER),
+      prReviews: { 1: [review(FROM_FULL, `${CODEX_BOT}[bot]`, AFTER)] },
+    });
+    await notCarried(tied);
+    // A review OLDER than the status is what the status already priced in.
+    const priced = carryFake({
+      ...claimedLater,
+      combined: fromStatus("success", AFTER),
+      prReviews: { 1: [review(FROM_FULL, `${CODEX_BOT}[bot]`, BEFORE)] },
+    });
+    expect((await run(priced))[0].state).toBe("success");
+  });
+
+  it("refuses a claim older than the pull request's latest retarget", async () => {
+    // The head and its statuses stand still through a retarget while the
+    // reviewed diff changes; the ordinary path floors every signal at it.
+    const retargeted = carryFake({
+      graphqlResponses: [repoPRs([prNode({
+        baseRefName: "main",
+        retargets: page([{ createdAt: "2026-08-14T12:06:00Z" }]),
+      })])],
+    });
+    await notCarried(retargeted);
+    expect(retargeted.calls.some((c) => c.path.includes("/rules/"))).toBe(false);
+    // A tie is stale too.
+    const tied = carryFake({
+      graphqlResponses: [repoPRs([prNode({ baseRefName: "main", retargets: page([{ createdAt: AFTER }]) })])],
+    });
+    await notCarried(tied);
+    // A claim posted after the retarget vouches for the current diff --
+    // and so does the source verdict, earned after it too.
+    const fresh = carryFake({
+      graphqlResponses: [repoPRs([prNode({
+        baseRefName: "main",
+        retargets: page([{ createdAt: "2026-08-14T10:30:00Z" }]),
+      })])],
+    });
+    expect((await run(fresh))[0].state).toBe("success");
+  });
+
+  it("refuses when Codex commented, or the owner nudged, after the named head was approved", async () => {
+    // Either lands between the last sweep's success and the push, so the
+    // status never saw it and the new head's own walk starts after it.
+    const codexComment = { user: { login: `${CODEX_BOT}[bot]` }, body: "Found a problem.", created_at: AFTER };
+    await notCarried(carryFake({ issueComments: { 1: [codexComment] } }));
+    await notCarried(carryFake({ reviewThreadComments: { 1: [codexComment] } }));
+    const nudge = { user: { login: OWNER }, body: "@codex review", created_at: AFTER, updated_at: AFTER };
+    await notCarried(carryFake({ reviewThreadComments: { 1: [nudge] } }));
+    // In the status's own second, both are ties, and a tie refuses.
+    await notCarried(carryFake({ ...claimedLater, combined: fromStatus("success", AFTER), issueComments: { 1: [codexComment] } }));
+    await notCarried(carryFake({ ...claimedLater, combined: fromStatus("success", AFTER), reviewThreadComments: { 1: [nudge] } }));
+    // Before the status, both are what the status already priced in.
+    const earlier = carryFake({
+      ...claimedLater,
+      combined: fromStatus("success", AFTER),
+      issueComments: { 1: [{ ...codexComment, created_at: BEFORE }, { ...nudge, created_at: BEFORE, updated_at: BEFORE }] },
+    });
+    expect((await run(earlier))[0].state).toBe("success");
+    // A clean comment naming the named head is the verdict restated.
+    const clean = {
+      user: { login: `${CODEX_BOT}[bot]` },
+      created_at: AFTER,
+      body: `Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** \`${FROM}\`\n\n<details>x</details>`,
+    };
+    expect((await run(carryFake({ issueComments: { 1: [clean] } })))[0].state).toBe("success");
+  });
+
+  it("lets a clean verdict answer a nudge or a finding the status never saw", async () => {
+    // The status does not move when Codex re-reads and passes -- `publish`
+    // leaves an identical success alone -- so the newest word about the
+    // named head decides, as it does on the ordinary path. Without this a
+    // nudge Codex has already answered costs the carry and buys a
+    // redundant re-review (Codex round 8). The exchange sits between the
+    // source approval and this head's own walk, so only the carry reads it.
+    const APPROVED = "2026-08-14T10:50:00Z";
+    const ASKED = "2026-08-14T10:55:00Z";
+    const ANSWERED = "2026-08-14T10:58:00Z";
+    const nudgeAt = (at) => ({ user: { login: OWNER }, body: "@codex review", created_at: at, updated_at: at });
+    const cleanAt = (at) => ({
+      user: { login: `${CODEX_BOT}[bot]` },
+      created_at: at,
+      body: `Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** \`${FROM}\`\n\n<details>x</details>`,
+    });
+    const exchange = (over) => carryFake({
+      combined: fromStatus("success", APPROVED),
+      checkSuites: { [FROM_FULL]: [bornSuite("2026-08-14T10:40:00Z", "claude/topic")], ...HEAD_SUITE },
+      ...over,
+    });
+    // Nudged, then answered: the carry stands.
+    expect((await run(exchange({ issueComments: { 1: [nudgeAt(ASKED), cleanAt(ANSWERED)] } })))[0].state).toBe("success");
+    // Findings on the named head, answered the same way.
+    expect((await run(exchange({
+      prReviews: { 1: [review(FROM_FULL, `${CODEX_BOT}[bot]`, ASKED)] },
+      issueComments: { 1: [cleanAt(ANSWERED)] },
+    })))[0].state).toBe("success");
+    // The other way round -- asked after the answer -- still refuses, and
+    // so does a tie.
+    await notCarried(exchange({ issueComments: { 1: [cleanAt(ASKED), nudgeAt(ANSWERED)] } }));
+    await notCarried(exchange({ issueComments: { 1: [cleanAt(ANSWERED), nudgeAt(ANSWERED)] } }));
+    // A clean verdict naming another head answers nothing.
+    await notCarried(exchange({
+      issueComments: { 1: [nudgeAt(ASKED), { ...cleanAt(ANSWERED), body: cleanAt(ANSWERED).body.replace(FROM, "bbb2222") }] },
+    }));
+  });
+
+  it("holds the carry below findings Codex left on this head", async () => {
+    const fake = carryFake({ prReviews: { 1: [review("abc1234")] } });
+    expect((await run(fake))[0]).toEqual({ number: 1, state: "pending", description: FINDINGS });
+  });
+
+  it("holds the carry below an owner nudge and a hold", async () => {
+    const nudged = carryFake({
+      issueComments: { 1: [{ user: { login: OWNER }, body: "@codex review", created_at: AFTER, updated_at: AFTER }] },
+    });
+    expect(await notCarried(nudged)).toEqual([]);
+    const held = carryFake({
+      graphqlResponses: [repoPRs([prNode({ baseRefName: "main", reactions: page([hold()]) })])],
+    });
+    expect((await run(held))[0].state).toBe("failure");
+    // Held settles without reading the claim at all.
+    expect(held.calls.some((c) => c.path.includes("/rules/"))).toBe(false);
+  });
+
+  it("carries through Codex's own re-read of the generated head", async () => {
+    // The 👀 is Codex re-reading images; the carry is what survives it.
+    const eyes = { content: "EYES", createdAt: AFTER, user: { login: `${CODEX_BOT}[bot]` } };
+    const fake = carryFake({
+      graphqlResponses: [repoPRs([prNode({ baseRefName: "main", reactions: page([eyes]) })])],
+    });
+    expect((await run(fake))[0]).toEqual({ number: 1, state: "success", description: CARRIED });
+    // Success: the head is settled, nothing left to poll for.
+    expect((await runFull(carryFake())).awaiting).toBe(0);
+  });
+
+  it("fails a shared head closed whatever it inherits", async () => {
+    const fake = carryFake({
+      graphqlResponses: [repoPRs([
+        prNode({ baseRefName: "main" }),
+        prNode({ number: 2, baseRefName: "main" }),
+      ])],
+    });
+    const written = await run(fake);
+    expect(written.every((w) => w.state === "failure")).toBe(true);
+    expect(fake.calls.some((c) => c.path.includes("/rules/"))).toBe(false);
+  });
+
+  it("reads the base's rules and the App once per sweep, not per head", async () => {
+    // Each pull request carries from its OWN source: one commit cannot have
+    // been the head of both when it was approved, and the stamp says which.
+    const OTHER = "bbb2222";
+    const OTHER_FULL = "bbb2222000000000000000000000000000000000";
+    const fake = carryFake({
+      statuses: {
+        abc1234: [gate(), lanesCarry()],
+        def5678: [gate(), lanesCarry({
+          description: `Generated-only push; verdict carried forward from ${OTHER}. [base 0beef12]`,
+        })],
+      },
+      combined: {
+        ...fromStatus(),
+        [OTHER]: {
+          sha: OTHER_FULL,
+          statuses: [{ context: CONTEXT, state: "success", created_at: BEFORE, description: earnedBy(2) }],
+        },
+      },
+      prCommits: { 1: [{ sha: FROM_FULL }, { sha: "abc1234" }], 2: [{ sha: OTHER_FULL }, { sha: "def5678" }] },
+      checkSuites: {
+        ...HEAD_SUITE,
+        def5678: [bornSuite("2026-08-14T11:30:00Z", "claude/other")],
+        [FROM_FULL]: [bornSuite("2026-08-14T10:30:00Z", "claude/topic")],
+        [OTHER_FULL]: [bornSuite("2026-08-14T10:30:00Z", "claude/other")],
+      },
+      graphqlResponses: [repoPRs([
+        prNode({ baseRefName: "main" }),
+        prNode({ number: 2, headRefOid: "def5678", headRefName: "claude/other", baseRefName: "main" }),
+      ])],
+    });
+    const written = await run(fake);
+    expect(written.map((w) => w.state)).toEqual(["success", "success"]);
+    expect(fake.calls.filter((c) => c.path.includes("/rules/")).length).toBe(1);
+    expect(fake.calls.filter((c) => c.path.startsWith("/apps/")).length).toBe(1);
   });
 });
 
