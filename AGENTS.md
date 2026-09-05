@@ -187,7 +187,11 @@ has stopped biting.
 - **Don't narrate routine machinery.** A check run flipping, a re-run, a scheduled check
   re-arming, a webhook echo, a resolved thread — act on those silently; the noise buries
   the one line that matters.
-
+- **Restate every review finding in chat, not just the count.** One bullet
+  each: review comment, top-level comment or review body alike, most blocking
+  first — what it claims, where, and what you did about it, or the options
+  where it's the maintainer's call. Summarize them all in that one reply;
+  ask only the most blocking question.
 ## Privacy
 
 - **Never put user data in any artifact that leaves this machine** — commit
