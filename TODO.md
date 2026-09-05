@@ -143,6 +143,28 @@ Guesses made under autopilot, recorded here so nothing decided without the
 repository owner silently becomes permanent. Each says what was decided, what
 the alternative was, and why it is reversible.
 
+### Every `codex: success` now names the pull request that earned it
+
+**Decided (2026-09-05, review round 9 on PR #41):** `publish` appends
+` (#N)` to every success description, and the carried verdict refuses a
+source status that does not name the pull request carrying from it.
+
+**The alternative** was another timestamp bound — the shape rounds 6, 7 and
+9 all reached for, each trying to establish from the outside what the writer
+knew at the time. None can: a check suite is born some time after the push
+it records, so a verdict another pull request earned on the source inside
+that delay satisfies every ordering test. This records the fact instead, and
+it is sound because this action only ever writes on the pull request's own
+head.
+
+**Reversible** in one commit: the stamp is appended in `publish` and read in
+`carriedVerdict`, nowhere else. The cost of removing it is going back to the
+unsound bound, and the cost of keeping it is that a `codex: success` written
+before this change names no pull request, so a carry from such a head
+refuses until the next verdict on it is written. The description is
+user-visible on the merge gate, which is why it is worth the owner's look:
+a status now reads `Codex reviewed this head, no findings (#41)`.
+
 ### A 👍 no longer outranks strictly newer findings on the same head
 
 **Decided (2026-08-17, security pass):** the reaction now approves only when
