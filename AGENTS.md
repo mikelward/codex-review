@@ -187,6 +187,9 @@ has stopped biting.
 - **Don't narrate routine machinery.** A check run flipping, a re-run, a scheduled check
   re-arming, a webhook echo, a resolved thread — act on those silently; the noise buries
   the one line that matters.
+- **Update the PR title and body with the push — body first, then push** —
+  so they describe the branch's latest state, not the scope it had when
+  opened.
 - **Restate every review finding in chat, not just the count.** One bullet
   each: review comment, top-level comment or review body alike, most blocking
   first — what it claims, where, and what you did about it, or the options
