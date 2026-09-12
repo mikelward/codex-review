@@ -149,6 +149,23 @@ theoretical collision.
       alone is the drift this repository's adoption exists to avoid. It
       belongs in a fleet-wide edit.
 
+## Open gap: a clean review in Codex's task-summary shape leaves the gate pending
+
+- [ ] **`cleanVerdict` matches one wording, and Codex now emits two** — the
+      accepted shape is "Codex Review: Didn't find any major issues" plus
+      "Reviewed commit: `<sha>`". Codex also posts a task summary — "Reviewed
+      commit `<sha>`: **0 findings**" with a "View task →" link — which the
+      matcher rejects, so the sweep writes "Codex left findings on this head"
+      on a review that found none. Seen repeatedly, in this repository's own
+      pull requests among others: one `@codex review` then produces the
+      accepted shape, and the gate clears on a head Codex had already passed.
+      The reaction is no fallback: that shape withdraws the `eyes` and leaves
+      **no** `+1` behind, so the PR body carries nothing at all.
+      Widening the matcher reaches all 22 consumers at `@main`, so it waits on
+      the maintainer (asked 2026-09-12, deliberately deferred). The cheaper
+      half — telling an agent to nudge Codex once when it sees a clean review
+      with no reaction — rides the fleet-wide wording pass instead.
+
 ## Decisions needing review
 
 Guesses made under autopilot, recorded here so nothing decided without the
