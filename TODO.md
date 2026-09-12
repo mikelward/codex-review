@@ -137,6 +137,18 @@ theoretical collision.
       own failed completion, which needs a guard against retrying a persistent
       failure forever, and is a template change of its own.
 
+## Open gap: the deferral sequence pushes before the reply is up
+
+- [ ] **`## Git and pull requests` says commit and push, then reply, then
+      resolve** — so the push starts Codex's next review before the deferral
+      reply is on the thread, and a fast pickup can re-raise the finding
+      without it. Commit to get the sha, reply, then push would close it.
+      Raised by Codex on PR #46, and not fixed there: that sequence is the
+      fleet's standard wording, shared verbatim by lanes, yaml-lite,
+      rust-update, gradle-update and ci-commit-artifact, so changing it here
+      alone is the drift this repository's adoption exists to avoid. It
+      belongs in a fleet-wide edit.
+
 ## Decisions needing review
 
 Guesses made under autopilot, recorded here so nothing decided without the
