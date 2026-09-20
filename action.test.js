@@ -465,6 +465,33 @@ describe("action.yml", () => {
     expect(section).toMatch(/pull_request_target/);
   });
 
+  it("keeps the deployment-branch citation with what it does not measure", () => {
+    // Two claims sit one sentence apart and are easy to read as one: a
+    // deployment-branch policy compares the ref a run REPORTS (measured,
+    // with a run id), and a run may report one ref while executing a file
+    // from another (the anomaly, unmeasured). The paragraph below still
+    // says the second is what an environment-as-boundary turns on, and
+    // that one observation does not settle it.
+    //
+    // Pinned together because the failure is silent and one-directional:
+    // trim the qualifier and the surviving citation reads as evidence for
+    // both, which is a license to treat the hole as closed. The run id
+    // alone is what makes the qualifier necessary, so neither half is
+    // worth keeping without the other.
+    const doc = readFileSync("docs/CONSUMER.md", "utf8");
+    const section = doc.match(
+      /\*\*What it does not buy: safety for a secret\.\*\*[\s\S]*?\n\n/,
+    )?.[0];
+    expect(typeof section).toBe("string");
+    expect(section).toMatch(/authorizes by the ref the run \*reports\*/);
+    expect(section).toMatch(/run 34691527682/);
+    // The qualifier, and that it names the anomaly as the thing NOT measured.
+    expect(section).toMatch(/measures the policy's basis, not the anomaly/);
+    // And the paragraph that keeps the anomaly open, which the citation
+    // must not be read as having closed.
+    expect(doc).toMatch(/which one observation does not settle/);
+  });
+
   it("documents the expected consumer ruleset, all three rules and both holds", () => {
     // Consumers configure branch protection from this section alone, so a
     // rule dropped from it is a consumer left unprotected with nothing red

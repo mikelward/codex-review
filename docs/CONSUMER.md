@@ -139,10 +139,15 @@ the whole of it.
 comes from the same branch-controlled ref, so a branch can add `environment:`
 and read `secrets.*` there as easily as it can replace the steps — and it does
 not even need this file, since a branch can add a workflow of its own on the
-same event. A deployment-branch policy authorizes by the ref the run *reports*,
-and the anomaly is precisely a run that reported the default branch while
-executing a branch-only file. No arrangement of triggers across these three
-files closes that, and none of them should be read as closing it.
+same event. A deployment-branch policy authorizes by the ref the run *reports*
+(verified: `mikelward/repo`, run 34691527682 — a `pull_request` job declaring
+an environment whose policy named `main` was refused before any step ran,
+reporting `refs/pull/<n>/merge`), and the anomaly is precisely a run that
+reported the default branch while executing a branch-only file. That run
+measures the policy's basis, not the anomaly: it says which ref is compared,
+and says nothing about whether a run can report one ref while executing
+another. No arrangement of triggers across these three files closes that, and
+none of them should be read as closing it.
 
 The comment events used to sit on the sweep, and the argument for leaving them
 there was that reaching the route needs a branch **in the consumer
