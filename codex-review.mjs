@@ -406,15 +406,26 @@ export async function codexReviewedAt(api, { owner, name, number, headRefOid, si
  * `readReactions`.
  *
  * The nudge is owner-only for the same reason holds are: this repo is
- * public, and letting any comment shaped like a nudge hold the loop open
- * would hand passers-by the runner bill.
+ * public, and letting any comment shaped like a nudge hold the gate would
+ * hand passers-by a merge block.
+ *
+ * `askAt` is the wider signal: the newest `@codex review` from anyone with
+ * write access, owner included. Codex answers a collaborator's ask too, and
+ * a clean answer is a 👍 that emits no webhook, so the ask has to restart
+ * the polling clock or that 👍 waits for the schedule. It only wakes and
+ * never holds, so the worst a collaborator can do with it is one
+ * UNANSWERED_MINUTES window of polling. Passers-by are still left out,
+ * because on a public repo their asks would cost the runner and buy nothing.
  */
+const WRITERS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
 export function commentSignals(comments, { since, owner, head }) {
   let codexAt = null;
   let nudgeAt = null;
+  let askAt = null;
   let cleanAt = null;
   const bound = utc(since);
-  if (!bound) return { codexAt, nudgeAt, cleanAt };
+  if (!bound) return { codexAt, nudgeAt, askAt, cleanAt };
   for (const c of comments ?? []) {
     const at = utc(c.created_at) ?? "";
     if (matchesBot(c.user)) {
@@ -441,10 +452,9 @@ export function commentSignals(comments, { since, owner, head }) {
         continue;
       }
       if (codexAt === null || at > codexAt) codexAt = at;
-    } else if (
-      Boolean(owner) && c.user?.login === owner
-      && /@codex review/i.test(c.body ?? "")
-    ) {
+    } else if (/@codex review/i.test(c.body ?? "")) {
+      const isOwner = Boolean(owner) && c.user?.login === owner;
+      if (!isOwner && !WRITERS.has(c.author_association)) continue;
       // A nudge can be EDITED into an old comment, whose created_at then
       // predates the head or the standing 👍 — dating the ask by the later
       // of creation and edit is what hears it. REST's `since` already
@@ -453,10 +463,11 @@ export function commentSignals(comments, { since, owner, head }) {
       // toward blocking on an owner's ask is this file's stated direction.
       const asked = laterOf(at, utc(c.updated_at));
       if (!asked || asked <= bound) continue;
-      if (nudgeAt === null || asked > nudgeAt) nudgeAt = asked;
+      if (askAt === null || asked > askAt) askAt = asked;
+      if (isOwner && (nudgeAt === null || asked > nudgeAt)) nudgeAt = asked;
     }
   }
-  return { codexAt, nudgeAt, cleanAt };
+  return { codexAt, nudgeAt, askAt, cleanAt };
 }
 
 /**
@@ -675,8 +686,9 @@ export async function unresolvedSecurityFindings(api, { owner, name, number }) {
 export async function codexCommentSignals(api, { owner, name, number, since, head }) {
   let codexAt = null;
   let nudgeAt = null;
+  let askAt = null;
   let cleanAt = null;
-  if (!since) return { codexAt, nudgeAt, cleanAt };
+  if (!since) return { codexAt, nudgeAt, askAt, cleanAt };
   // Both comment streams: top-level (`issues/…/comments`) and inline
   // review-thread replies (`pulls/…/comments`). A rebuttal-plus-nudge is
   // most naturally typed as a thread reply, and since the sweep is the sole
@@ -690,11 +702,12 @@ export async function codexCommentSignals(api, { owner, name, number, since, hea
       const seen = commentSignals(batch, { since, owner, head });
       if (seen.codexAt !== null && (codexAt === null || seen.codexAt > codexAt)) codexAt = seen.codexAt;
       if (seen.nudgeAt !== null && (nudgeAt === null || seen.nudgeAt > nudgeAt)) nudgeAt = seen.nudgeAt;
+      if (seen.askAt !== null && (askAt === null || seen.askAt > askAt)) askAt = seen.askAt;
       if (seen.cleanAt !== null && (cleanAt === null || seen.cleanAt > cleanAt)) cleanAt = seen.cleanAt;
       if (!batch || batch.length < 100) break;
     }
   }
-  return { codexAt, nudgeAt, cleanAt };
+  return { codexAt, nudgeAt, askAt, cleanAt };
 }
 
 /**
@@ -1918,6 +1931,8 @@ export async function sweep({
     let findings = false;
     let nudged = false;
     let nudgeAt = null;
+    let askAt = null;
+    let answeredAt = null;
     let reviewedAt = null;
     if (undecided) {
       reviewedAt = await codexReviewedAt(api, {
@@ -1942,9 +1957,10 @@ export async function sweep({
       });
       const codexAt = signals.codexAt;
       nudgeAt = signals.nudgeAt;
+      askAt = signals.askAt;
       // Codex's last word on this head, wherever it was said: a review, a
       // comment, or — for a clean pass, which leaves neither — the 👍.
-      const answeredAt = laterOf(reviewedAt, codexAt, approvedAt, signals.cleanAt);
+      answeredAt = laterOf(reviewedAt, codexAt, approvedAt, signals.cleanAt);
       // A nudge newer than Codex's last word reopens the wait: the answer
       // is due again, exactly as during a read — so the head counts as
       // awaiting and the clock runs. Deriving this from the comments on
@@ -2068,7 +2084,12 @@ export async function sweep({
       }
       return 1;
     }
-    if (verdict.description === FINDINGS && reviewedAt) return 0;
+    // A head Codex left findings on waits for a push, which is an event, so
+    // it stops polling. Not when someone has asked for a re-review since:
+    // Codex may answer that with a 👍, which no webhook announces. A tie
+    // counts as unanswered, as it does for the nudge.
+    const askOpen = Boolean(askAt) && (answeredAt === null || askAt >= answeredAt);
+    if (verdict.description === FINDINGS && reviewedAt && !askOpen) return 0;
     // SECURITY deliberately keeps the clock, unlike FINDINGS. What clears it
     // is a thread being resolved, and resolving emits nothing the listener
     // hears, so polling is the only way to see it. The age path below still
@@ -2125,7 +2146,9 @@ export async function sweep({
       return 1;
     };
     const anchoring = mine.find((s) => !PARKED.has(s.description));
-    let waitedSince = laterOf(bound, nudgeAt, utc(anchoring?.created_at));
+    // `askAt` includes the owner's nudge, and any collaborator's ask restarts
+    // the window the same way, so the 👍 that answers it is seen.
+    let waitedSince = laterOf(bound, askAt, utc(anchoring?.created_at));
     if (!waitedSince) return stillPolling();
     let ms = Date.parse(waitedSince);
     if (Number.isNaN(ms)) return stillPolling();

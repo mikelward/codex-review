@@ -89,33 +89,6 @@ theoretical collision.
       can prove, which is the same thing `checkSuiteBirths` cannot currently
       establish. Fix that first; this falls out of it.
 
-## Open gap: the nudge the escalation advertises only works for the owner
-
-- [ ] **`commentSignals` counts `@codex review` as a nudge only from the
-      repository owner** (`c.user?.login === owner`), and that is deliberate:
-      `nudged` closes the gate, so accepting it from anyone who can comment
-      would hand any commenter a merge block. But the `UNANSWERED` description
-      added in PR #37 tells whoever reads the check to comment `@codex review`,
-      and for a collaborator that instruction is only half true — Codex does
-      review, so a review or a finding comment still wakes the sweep by
-      webhook, but a clean 👍 emits nothing and the head waits for the
-      schedule rather than resuming the fast clock.
-      Raised by Codex on PR #37. Real, and the wording is what made it
-      visible — the underlying stall predates it, since a non-owner's nudge
-      never restarted polling.
-      Neither remedy Codex proposed fits: widening the nudge reopens the
-      merge-block vector, and owner-qualifying the text is not available
-      either — `UNANSWERED` is a module constant the stickiness compares
-      byte for byte off the head, so interpolating a login would make the
-      marker per-repository and the comparison fragile, inside GitHub's
-      140-character description cap.
-      The shape that does fit is a separate signal: treat ANY commenter's
-      `@codex review` as a reason to resume polling, while still requiring
-      the owner's to HOLD the gate. Waking costs runner minutes and is
-      bounded by `UNANSWERED_MINUTES`; it can block nothing. That is a change
-      to `commentSignals`' contract and a different logical change from
-      PR #37, so it gets its own pull request.
-
 ## Open gap: a run that cannot list the open pull requests leaves stale verdicts
 
 - [ ] **The one escaping failure that does not fail closed.** `sweep` contains
