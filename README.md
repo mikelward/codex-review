@@ -364,7 +364,9 @@ robust review:
   nothing goes red, and a standing `success` stays mergeable. The twelve
   current consumers are personal repos; an org adoption needs this rethought
   (repo admins instead of the owner segment) before the reactions mean
-  anything.
+  anything. A collaborator's `@codex review` does restart the polling
+  clock, so the 👍 that answers it is seen promptly, but it never holds the
+  gate.
 - **A shared head fails closed, and an outsider can share yours.** The
   status belongs to the commit, so two open pull requests carrying the same
   head are ambiguous and publish `failure` — including when the other PR is

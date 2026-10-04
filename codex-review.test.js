@@ -392,9 +392,27 @@ describe("commentSignals", () => {
   });
 
   it("ignores a nudge-shaped comment from anyone but the owner", () => {
-    // Public repo: a passer-by's nudge must not hold the loop open, for
-    // the same reason their reactions cannot hold the gate.
-    expect(read([c("passer-by", "2026-08-15T08:00:00Z", "@codex review")]).nudgeAt).toBeNull();
+    // Public repo: a passer-by's nudge must not hold the gate, for the same
+    // reason their reactions cannot. Nor does it wake the clock: their ask
+    // costs the runner and buys nothing.
+    const seen = read([c("passer-by", "2026-08-15T08:00:00Z", "@codex review")]);
+    expect(seen.nudgeAt).toBeNull();
+    expect(seen.askAt).toBeNull();
+  });
+
+  it("hears a collaborator's @codex review as an ask, never a nudge", () => {
+    // Codex answers it, so the clock has to hear it, but only the owner's
+    // ask holds the gate.
+    const ask = { ...c("collaborator", "2026-08-15T08:00:00Z", "@codex review"), author_association: "COLLABORATOR" };
+    const seen = read([ask]);
+    expect(seen.askAt).toBe("2026-08-15T08:00:00Z");
+    expect(seen.nudgeAt).toBeNull();
+  });
+
+  it("counts the owner's nudge as an ask too", () => {
+    const seen = read([c(OWNER, "2026-08-15T08:00:00Z", "@codex review")]);
+    expect(seen.askAt).toBe("2026-08-15T08:00:00Z");
+    expect(seen.nudgeAt).toBe("2026-08-15T08:00:00Z");
   });
 
   it("does not read an ordinary owner comment as a nudge", () => {
@@ -407,7 +425,7 @@ describe("commentSignals", () => {
     // where a wrong "findings" strands the verdict on the throttled
     // schedule.
     expect(commentSignals([c(`${CODEX_BOT}[bot]`, "2026-08-15T08:00:00Z")], { since: undefined, owner: OWNER }))
-      .toEqual({ codexAt: null, nudgeAt: null, cleanAt: null });
+      .toEqual({ codexAt: null, nudgeAt: null, askAt: null, cleanAt: null });
   });
 });
 
@@ -2835,6 +2853,63 @@ describe("sweep, with a Codex security finding on the pull request", () => {
     const { written, failed } = await runFull(failing);
     expect(written.filter((w) => w.state === "success")).toEqual([]);
     expect(failed.length).toBe(1);
+  });
+});
+
+describe("sweep, when a collaborator asks for a re-review", () => {
+  const ask = (created_at, author_association = "COLLABORATOR") =>
+    ({ user: { login: "collaborator" }, author_association, created_at, body: "@codex review" });
+
+  it("keeps a head with findings on the clock until Codex answers the ask", async () => {
+    // Codex may answer with a 👍, which no webhook announces, so settling
+    // the head on its findings would leave that 👍 to the schedule.
+    const withAsk = (comments) => runFull(fakeFetch({
+      statuses: { abc1234: [gate("2026-08-14T12:05:10Z", "pending", FINDINGS), gate()] },
+      prReviews: { 1: [review()] },
+      issueComments: { 1: comments },
+      graphqlResponses: [repoPRs([prNode()])],
+    }));
+    const asked = await withAsk([ask("2026-08-14T12:05:30Z")]);
+    expect(asked.awaiting).toBe(1);
+    // The ask wakes the clock but does not move the verdict.
+    expect(asked.written).toEqual([]);
+    // Without it, or with a passer-by's, the findings settle the head.
+    expect((await withAsk([])).awaiting).toBe(0);
+    expect((await withAsk([ask("2026-08-14T12:05:30Z", "NONE")])).awaiting).toBe(0);
+  });
+
+  it("does not hold an approved head", async () => {
+    // Only the owner's nudge closes the gate over a standing 👍; anyone
+    // else's would be a merge block for whoever can comment.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      checkSuites: { abc1234: [bornSuite()] },
+      issueComments: { 1: [ask("2026-08-14T12:10:00Z")] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+    });
+    expect((await run(fake))[0].state).toBe("success");
+  });
+
+  it("takes a parked head back onto the clock", async () => {
+    // The UNANSWERED description tells whoever reads it to comment
+    // `@codex review`. A collaborator doing so now gets the same restart
+    // the owner's nudge does.
+    const after = (comments) => sweep({
+      owner: OWNER, name: "r", token: "t",
+      fetchImpl: fakeFetch({
+        statuses: { abc1234: [gate("2026-08-14T12:40:00Z", "pending", UNANSWERED), gate("2026-08-14T12:00:00Z")] },
+        issueComments: { 1: comments },
+        graphqlResponses: [repoPRs([prNode()])],
+      }).impl,
+      log: () => {}, now: () => Date.parse("2026-08-14T12:45:00Z"),
+    });
+    const asked = await after([ask("2026-08-14T12:44:00Z")]);
+    expect(asked.awaiting).toBe(1);
+    expect(asked.written).toEqual([{ number: 1, state: "pending", description: PENDING }]);
+    // An ask the park already waited out stays accounted for.
+    const old = await after([ask("2026-08-14T12:05:00Z")]);
+    expect(old.awaiting).toBe(0);
+    expect(old.written).toEqual([]);
   });
 });
 
