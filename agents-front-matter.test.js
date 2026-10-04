@@ -43,6 +43,6 @@ test("front matter carries a last_modified date", () => {
 });
 
 test("the guide tells agents to report the loaded file at session start", () => {
-  assert.match(text, /At\s+the\s+start\s+of\s+every\s+session,\s+print\s+the\s+path\s+of\s+the\s+`AGENTS\.md`\s+you\s+loaded/);
+  assert.match(text, /At\s+the\s+start\s+of\s+every\s+session,\s+print\s+the\s+full\s+absolute\s+path\s+of\s+the\s+`AGENTS\.md`\s+you\s+loaded/);
   assert.match(text, /Bump\s+`last_modified`\s+whenever\s+you\s+edit\s+this\s+file/);
 });
