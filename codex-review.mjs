@@ -93,6 +93,20 @@ export const PENDING = "Waiting for Codex to approve this head";
 export const FINDINGS = "Codex left findings on this head";
 
 /**
+ * The pending description for a head that would otherwise be approved while
+ * a Codex security finding on the pull request still stands unresolved.
+ *
+ * Separate from FINDINGS because the scope differs: FINDINGS is about this
+ * head, and a push clears it. A security review runs when the pull request
+ * opens, not on every push -- on mikelward/repo#56 one ran against about 40
+ * code reviews -- so its finding names a commit the next push leaves behind,
+ * and judging per head would let that head's 👍 publish `success` over it.
+ * Resolving the thread is what clears it, the same act a ruleset requiring
+ * conversation resolution already asks for.
+ */
+export const SECURITY = "Codex left a security finding — address it and resolve its thread";
+
+/**
  * The pending description written over a head the sweep has repeatedly
  * failed to read — see the failure streak in `sweep`. The run going red is
  * not enough on its own: branch protection consumes the *status*, and a
@@ -611,6 +625,53 @@ export async function codeReviewTableStatus(api, { owner, name, number, head }) 
   }
 }
 
+/**
+ * Is this review comment a Codex security finding? The HTML marker is the
+ * machine-readable tag; the heading is accepted too, so that Codex dropping
+ * the marker leaves the finding still blocking rather than silently not.
+ */
+export const isSecurityFinding = (body) =>
+  /codex-security-review-finding|Codex Security Review/.test(String(body ?? ""));
+
+/**
+ * How many Codex security findings on this pull request still have an
+ * unresolved thread.
+ *
+ * Read from the threads, not from the findings list in Codex's status-table
+ * comment. That list also says Resolved, but in Codex's own words, which
+ * could change; `isResolved` is GitHub's own field, and the same one a
+ * ruleset requiring conversation resolution reads. Every thread counts,
+ * outdated ones included, because a finding on an earlier commit is the
+ * whole case.
+ *
+ * Only the login is checked, not a type, so a stranger who registers a
+ * lookalike name can hold a head at pending. That costs no more than an
+ * unresolved thread already costs under conversation resolution. Requiring
+ * the type would instead let a real finding through whenever the type
+ * failed to read.
+ *
+ * Nothing here waits on the security review itself. If it is out of
+ * quota, not enabled, or never answers, it leaves no thread, and the code
+ * review's verdict stands alone.
+ */
+export async function unresolvedSecurityFindings(api, { owner, name, number }) {
+  let open = 0;
+  for (let after = null; ;) {
+    const data = await api.graphql(REVIEW_THREADS, { owner, name, number, after });
+    // Unguarded, as the open-PR read is: a missing connection is a failed
+    // read, and reading it as "no threads" would approve over a finding.
+    const threads = data.repository.pullRequest.reviewThreads;
+    for (const t of threads.nodes) {
+      if (t.isResolved) continue;
+      const root = t.comments?.nodes?.[0];
+      if (!root || !matchesBotLogin(root.author?.login)) continue;
+      if (isSecurityFinding(root.body)) open += 1;
+    }
+    if (!threads.pageInfo.hasNextPage) return open;
+    after = threads.pageInfo.endCursor;
+  }
+}
+
 export async function codexCommentSignals(api, { owner, name, number, since, head }) {
   let codexAt = null;
   let nudgeAt = null;
@@ -642,6 +703,7 @@ export async function codexCommentSignals(api, { owner, name, number, since, hea
  */
 export function verdictFor({
   isDraft, approved, sharedHead, held, reading, findings, nudged, unanswered, carried = null,
+  security = false,
 }) {
   if (isDraft) return null;
 
@@ -661,6 +723,11 @@ export function verdictFor({
   if (held) {
     return { state: "failure", description: `On hold: ${held} on the pull request` };
   }
+
+  // Above the carry and the approval, because neither is about it: both are
+  // verdicts on a head, and an unresolved security finding belongs to the
+  // pull request (see SECURITY).
+  if (security) return { state: "pending", description: SECURITY };
 
   // Codex still reading is the answer being written, not a hold: `pending`,
   // even over a 👍 (a re-read in progress revokes the old verdict's meaning
@@ -744,6 +811,18 @@ query($owner:String!, $name:String!, $number:Int!, $after:String!) {
   repository(owner:$owner, name:$name) {
     pullRequest(number:$number) {
       reactions(first:100, after:$after) { ${PAGE} nodes { content createdAt user { login } } }
+    }
+  }
+}`;
+
+const REVIEW_THREADS = `
+query($owner:String!, $name:String!, $number:Int!, $after:String) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      reviewThreads(first:100, after:$after) {
+        ${PAGE}
+        nodes { isResolved comments(first:1) { nodes { author { login } body } } }
+      }
     }
   }
 }`;
@@ -1927,7 +2006,7 @@ export async function sweep({
     // and the cheaper of the two wrongs.
     const parkedAt = PARKED.has(mine[0]?.description) ? utc(mine[0].created_at) : null;
     const parkStands = parkedAt !== null && (nudgeAt === null || parkedAt > nudgeAt);
-    const verdict = verdictFor({
+    const facts = {
       isDraft: false, approved: cleanlyApproved, sharedHead, held, reading,
       findings, nudged: nudged && !parkStands, carried,
       // Read back off the head rather than recomputed: see UNANSWERED for
@@ -1946,7 +2025,17 @@ export async function sweep({
       // be told apart from outside: where they differ the nudge is newer,
       // and `nudged` then outranks this anyway. Same concept, named once.
       unanswered: parkStands ? marker(node) : null,
-    });
+    };
+    let verdict = verdictFor(facts);
+    // Read only where it can change the answer: a security finding never
+    // matters to a head that is not about to be approved.
+    if (verdict.state === "success") {
+      const security = await unresolvedSecurityFindings(api, { owner, name, number: node.number });
+      if (security > 0) {
+        log(`#${node.number}: ${security} unresolved Codex security finding(s) — not approving`);
+        verdict = verdictFor({ ...facts, security: true });
+      }
+    }
     const changed = await publish(writer, { owner, name, pr: node, verdict, current: mine[0], log, appLogin });
     if (changed) written.push({ number: node.number, ...verdict });
     if (verdict.state !== "pending") return 0;
@@ -1980,6 +2069,10 @@ export async function sweep({
       return 1;
     }
     if (verdict.description === FINDINGS && reviewedAt) return 0;
+    // SECURITY deliberately keeps the clock, unlike FINDINGS. What clears it
+    // is a thread being resolved, and resolving emits nothing the listener
+    // hears, so polling is the only way to see it. The age path below still
+    // parks it after UNANSWERED_MINUTES, keeping its wording.
     // Everything else pending is a wait for an answer that arrives within
     // minutes of the event that asked for it — the push for a fresh head,
     // the nudge for a re-review, the push for the 👍 a comment-only finding

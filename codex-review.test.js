@@ -5,6 +5,9 @@ import {
   runLoop,
   PENDING,
   FINDINGS,
+  SECURITY,
+  isSecurityFinding,
+  unresolvedSecurityFindings,
   matchesBot,
   matchesBotLogin,
   readReactions,
@@ -141,6 +144,24 @@ describe("verdictFor", () => {
     expect(verdictFor({ carried: "abc1234", held: "👎" }).state).toBe("failure");
     expect(verdictFor({ carried: "abc1234", sharedHead: true }).state).toBe("failure");
     expect(verdictFor({ carried: "abc1234", isDraft: true })).toBeNull();
+  });
+
+  it("withholds approval, carried or earned, over an unresolved security finding", () => {
+    // The finding belongs to the pull request, not the head, so neither a
+    // 👍 on this head nor a verdict carried from the last one answers it.
+    expect(verdictFor({ approved: true, security: true })).toEqual({
+      state: "pending",
+      description: SECURITY,
+    });
+    expect(verdictFor({ carried: "abc1234", security: true })).toEqual({
+      state: "pending",
+      description: SECURITY,
+    });
+    // A hold and a shared head still say what they say: both already
+    // block, and both name a remedy the security wording does not.
+    expect(verdictFor({ approved: true, security: true, held: "👎" }).state).toBe("failure");
+    expect(verdictFor({ approved: true, security: true, sharedHead: true }).state).toBe("failure");
+    expect(verdictFor({ approved: true, security: true, isDraft: true })).toBeNull();
   });
 });
 
@@ -646,11 +667,15 @@ const hold = (content = "THUMBS_DOWN", login = OWNER) => ({
 // `branchRules` is what `GET /rules/branches/<base>` returns; `apps` maps
 // an App slug to its record; `combined` maps a ref to its combined status
 // (`GET /commits/<ref>/status`), the one read that resolves a short SHA.
+// `reviewThreads` maps a PR number to GraphQL thread nodes, served 100 to a
+// page by their own query rather than from `graphqlResponses`, so a test that
+// never mentions threads reads none.
 function fakeFetch({
   graphqlResponses = [], statuses = {}, issueComments = {}, prReviews = {},
   reviewThreadComments = {}, checkSuites = {}, issueReactions = {},
   failStatusWrite = false, failComments = false,
   branchRules = null, apps = {}, combined = {}, prCommits = {},
+  reviewThreads = {},
 } = {}) {
   const calls = [];
   const queue = [...graphqlResponses];
@@ -662,6 +687,26 @@ function fakeFetch({
       auth: opts.headers?.authorization,
     });
 
+    if (path === "/graphql" && JSON.parse(opts.body).query.includes("reviewThreads")) {
+      const { number, after } = JSON.parse(opts.body).variables;
+      const all = reviewThreads[number] ?? [];
+      const start = after === null ? 0 : Number(after);
+      const nodes = all.slice(start, start + 100);
+      const hasNextPage = start + 100 < all.length;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            repository: {
+              pullRequest: {
+                reviewThreads: page(nodes, hasNextPage, hasNextPage ? String(start + 100) : null),
+              },
+            },
+          },
+        }),
+      };
+    }
     if (path === "/graphql") {
       const data = queue.shift();
       if (!data) throw new Error("unexpected extra graphql call");
@@ -2651,6 +2696,148 @@ describe("sweep", () => {
 // Codex's answer on that head rather than waiting for a re-read of files CI
 // wrote back.
 
+// A Codex security finding as GraphQL returns its thread: the root comment
+// carries the marker, and the bot's login arrives bare, as it does on every
+// GraphQL actor.
+const SECURITY_BODY = [
+  "<!-- codex-security-review-finding:v1 -->",
+  "",
+  "### 🛡️ Codex Security Review · _Automatically triggered_",
+  "",
+  "**P1 Badge Security: Check the input before trusting it**",
+].join("\n");
+const thread = ({ isResolved = false, login = CODEX_BOT, body = SECURITY_BODY } = {}) => ({
+  isResolved,
+  comments: { nodes: [{ author: { login }, body }] },
+});
+const CODE_FINDING = "**P1 Badge Handle the empty case**\n\nUseful? React with 👍 / 👎.";
+// A head Codex has approved with a 👍, and these threads on its pull request.
+const approvedWith = (threads, over = {}) => fakeFetch({
+  statuses: { abc1234: [gate()] },
+  checkSuites: { abc1234: [bornSuite()] },
+  graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+  reviewThreads: { 1: threads },
+  ...over,
+});
+const threadReads = (fake) =>
+  fake.calls.filter((c) => c.path === "/graphql" && c.body.query.includes("reviewThreads"));
+
+describe("isSecurityFinding", () => {
+  it("knows a finding by its marker or by its heading", () => {
+    expect(isSecurityFinding(SECURITY_BODY)).toBe(true);
+    // Either alone is enough, so Codex dropping one leaves the finding
+    // blocking rather than silently not.
+    expect(isSecurityFinding("<!-- codex-security-review-finding:v1 -->")).toBe(true);
+    expect(isSecurityFinding("### 🛡️ Codex Security Review · _Requested_")).toBe(true);
+  });
+
+  it("does not take a code-review finding for one", () => {
+    expect(isSecurityFinding(CODE_FINDING)).toBe(false);
+    expect(isSecurityFinding(null)).toBe(false);
+  });
+});
+
+describe("unresolvedSecurityFindings", () => {
+  const api = (nodes) => ({
+    graphql: async () => ({ repository: { pullRequest: { reviewThreads: page(nodes) } } }),
+  });
+
+  it("counts Codex's unresolved security threads and nothing else", async () => {
+    const n = await unresolvedSecurityFindings(api([
+      thread(),
+      thread(),
+      thread({ isResolved: true }),
+      thread({ body: CODE_FINDING }),
+      thread({ login: "someone" }),
+      // A deleted root comment, and a root whose author's account is gone.
+      { isResolved: false, comments: { nodes: [] } },
+      { isResolved: false, comments: { nodes: [{ author: null, body: SECURITY_BODY }] } },
+    ]), { owner: OWNER, name: "r", number: 1 });
+    expect(n).toBe(2);
+  });
+
+  it("refuses to read a missing thread list as an empty one", async () => {
+    // Zero is what approves, so a response without the connection has to
+    // fail the read rather than count as nothing found.
+    const empty = { graphql: async () => ({ repository: { pullRequest: null } }) };
+    let threw = false;
+    try {
+      await unresolvedSecurityFindings(empty, { owner: OWNER, name: "r", number: 1 });
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+  });
+});
+
+describe("sweep, with a Codex security finding on the pull request", () => {
+  it("withholds success from a later head while the finding is unresolved", async () => {
+    // The case this exists for: the security review ran on an earlier
+    // commit, so nothing on this head mentions it, and the 👍 is genuine.
+    const fake = approvedWith([thread()]);
+    expect(await run(fake)).toEqual([
+      { number: 1, state: "pending", description: SECURITY },
+    ]);
+  });
+
+  it("approves once the finding's thread is resolved", async () => {
+    const fake = approvedWith([thread({ isResolved: true })]);
+    expect((await run(fake))[0].state).toBe("success");
+  });
+
+  it("leaves a code-review thread to the head's own verdict", async () => {
+    // Code findings are judged per head, and Codex re-reads every push; only
+    // the security review, which does not, needs the pull-request-wide read.
+    const fake = approvedWith([thread({ body: CODE_FINDING })]);
+    expect((await run(fake))[0].state).toBe("success");
+  });
+
+  it("ignores the marker on a thread someone else opened", async () => {
+    const fake = approvedWith([thread({ login: "someone" })]);
+    expect((await run(fake))[0].state).toBe("success");
+  });
+
+  it("reads the threads to the last page", async () => {
+    const codeThreads = Array.from({ length: 100 }, () => thread({ body: CODE_FINDING }));
+    const fake = approvedWith([...codeThreads, thread()]);
+    expect((await run(fake))[0].description).toBe(SECURITY);
+    expect(threadReads(fake).length).toBe(2);
+  });
+
+  it("reads no threads for a head that is not about to be approved", async () => {
+    // The verdict is pending either way, so the read could not change it.
+    const fake = fakeFetch({
+      graphqlResponses: [repoPRs([prNode()])],
+      reviewThreads: { 1: [thread()] },
+    });
+    expect(await run(fake)).toEqual([{ number: 1, state: "pending", description: PENDING }]);
+    expect(threadReads(fake)).toEqual([]);
+  });
+
+  it("keeps the head on the clock, since resolving a thread wakes nothing", async () => {
+    // Resolution emits no event the listener relays, so an idle loop would
+    // leave the approval to the four-hourly schedule.
+    const fake = approvedWith([thread()]);
+    expect((await runFull(fake)).awaiting).toBe(1);
+  });
+
+  it("fails the head, rather than approving, when the thread read fails", async () => {
+    const fake = approvedWith([thread()]);
+    const failing = {
+      ...fake,
+      impl: async (url, opts = {}) => {
+        if (opts.body && JSON.parse(opts.body).query?.includes("reviewThreads")) {
+          return { ok: true, status: 200, json: async () => ({ errors: [{ message: "boom" }] }) };
+        }
+        return fake.impl(url, opts);
+      },
+    };
+    const { written, failed } = await runFull(failing);
+    expect(written.filter((w) => w.state === "success")).toEqual([]);
+    expect(failed.length).toBe(1);
+  });
+});
+
 const FROM = "aaa1111";
 const FROM_FULL = "aaa1111000000000000000000000000000000000";
 const LANES_APP = { login: "lanes-app[bot]", type: "Bot" };
@@ -2738,6 +2925,13 @@ describe("sweep, carrying a verdict across a generated push", () => {
     const bound = encodeURIComponent("2026-08-14T10:59:59Z");
     expect(paths.some((p) => p.includes(`/issues/1/comments?since=${bound}`))).toBe(true);
     expect(paths.some((p) => p.includes(`/pulls/1/comments?since=${bound}`))).toBe(true);
+  });
+
+  it("does not carry a verdict over an unresolved security finding", async () => {
+    // The carry vouches for a head; the finding is about the pull request,
+    // so the generated push that carries one cannot answer the other.
+    const fake = carryFake({ reviewThreads: { 1: [thread()] } });
+    expect(await run(fake)).toEqual([{ number: 1, state: "pending", description: SECURITY }]);
   });
 
   it("reads nothing extra for a head whose lanes verdict is its own", async () => {
