@@ -200,6 +200,20 @@ A clean comment naming some other commit decides nothing at all.
 So a `success` with no reaction on the body is expected, not a fault — read
 the comments before reporting the gate broken.
 
+**An unresolved security finding holds approval for the whole pull
+request.** Where Codex's security review is enabled, it runs when the pull
+request opens, not on every push. Its finding therefore names a commit the
+next push leaves behind, and reading per head would let that push's 👍 approve
+over it. So before publishing `success`, the sweep reads the pull request's
+review threads. Any unresolved thread Codex opened as a security finding keeps
+the head at `pending`, with the description `Codex left a security finding —
+address it and resolve its thread`. Nothing waits on the security review
+itself: if it is out of quota, not enabled, or never answers, it leaves no
+thread, and the code review's verdict stands alone. Resolving a thread sends
+no event the listener relays, so a head held only by this stays on the minute
+clock for the usual window. After that, the next comment, push or scheduled
+sweep picks up the resolution.
+
 Approval also requires no 👀 and no 👎 from the repository owner, and no owner
 `@codex review` newer than the 👍. That makes a hold two seconds of work from a
 phone, which matters because without one, auto-merge can land a pull request
