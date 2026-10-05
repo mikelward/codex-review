@@ -124,7 +124,7 @@ theoretical collision.
 
 ## Open gap: a clean review in Codex's task-summary shape leaves the gate pending
 
-- [ ] **`cleanVerdict` matches one wording, and Codex now emits two** — the
+- [ ] **`cleanVerdict` matches one wording, and Codex emits others** — the
       accepted shape is "Codex Review: Didn't find any major issues" plus
       "Reviewed commit: `<sha>`". Codex also posts a task summary — "Reviewed
       commit `<sha>`: **0 findings**" with a "View task →" link — which the
@@ -134,10 +134,26 @@ theoretical collision.
       accepted shape, and the gate clears on a head Codex had already passed.
       The reaction is no fallback: that shape withdraws the `eyes` and leaves
       **no** `+1` behind, so the PR body carries nothing at all.
+      A third shape appeared on #52: a "## Review Result" heading, "No
+      blocking findings.", prose citing permalinks to the head, a
+      **Testing** list and a "View task →" link, with no "Reviewed commit"
+      line, no review record, no reaction and no status-table comment yet.
+      It is a worse match than the second: the head appears only inside the
+      permalinks, and "no blocking findings" does not say there were none.
+      One `@codex review` answered it in the accepted shape two minutes
+      later.
+      A fourth appeared on #55, the pull request recording the third: the
+      accepted headline as a "##" heading, "Reviewed commit:" with the full
+      sha, then the same prose, **Testing** list and "View task →" link, and
+      again no reaction. It names the head and says the clean words, but as a
+      heading, with no closing stop, and with a report after it, and each of
+      those alone fails the two-line comment `cleanVerdict` validates.
       Widening the matcher reaches all 22 consumers at `@main`, so it waits on
-      the maintainer (asked 2026-09-12, deliberately deferred). The cheaper
-      half — telling an agent to nudge Codex once when it sees a clean review
-      with no reaction — rides the fleet-wide wording pass instead.
+      the maintainer: asked 2026-09-12 and deferred, asked again 2026-10-05
+      with the third shape and **kept deferred, with the nudge as the
+      remedy**. An agent that sees a clean review in any of these shapes and
+      no `+1` comments `@codex review` once; the wording for that rides the
+      fleet-wide pass.
 
 ## Decisions needing review
 
