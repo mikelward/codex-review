@@ -3872,6 +3872,52 @@ describe("cleanVerdict", () => {
     expect(cleanVerdict(undefined, HEAD)).toBe(null);
     expect(cleanVerdict("", HEAD)).toBe(null);
   });
+
+  // The clean shapes TODO.md records as refused, kept refused on the
+  // maintainer's decision (2026-10-05): the remedy is one `@codex review`,
+  // not a wider matcher. Pinned so a matcher change cannot quietly make that
+  // entry false. Each names this head, so a refusal is about the shape.
+  const TASK_TAIL = [
+    "",
+    "**Testing**",
+    "- ✅ `node --test *.test.js`",
+    "",
+    " [View task →](https://chatgpt.com/s/cd_0)",
+  ];
+
+  it("refuses the task summary that counts zero findings", () => {
+    const body = ["Reviewed commit `5f3881b6c0`: **0 findings**", ...TASK_TAIL].join("\n");
+    expect(cleanVerdict(body, HEAD)).toBe(null);
+  });
+
+  it("refuses a review result that names the head only in its links", () => {
+    // "No blocking findings" does not say there were none, and the head is
+    // nowhere but inside the permalinks.
+    const body = [
+      "## Review Result",
+      "",
+      "No blocking findings.",
+      "",
+      `The change does what it says. [file.mjsL1-L2](https://github.com/o/r/blob/${HEAD}/file.mjs#L1-L2)`,
+      ...TASK_TAIL,
+    ].join("\n");
+    expect(cleanVerdict(body, HEAD)).toBe(null);
+  });
+
+  it("refuses the clean headline as a heading with a task summary after it", () => {
+    // It names the head and says the clean words, but as a heading, with no
+    // closing stop, and with a report after it -- each alone fails the
+    // two-line comment this matcher validates whole.
+    const body = [
+      "## Codex Review: Didn't find any major issues",
+      "",
+      `Reviewed commit: \`${HEAD}\``,
+      "",
+      "The change does what it says.",
+      ...TASK_TAIL,
+    ].join("\n");
+    expect(cleanVerdict(body, HEAD)).toBe(null);
+  });
 });
 
 describe("the published wording", () => {
