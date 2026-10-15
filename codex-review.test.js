@@ -3786,6 +3786,41 @@ describe("cleanVerdict", () => {
     expect(cleanVerdict(real, HEAD)).toBe("head");
   });
 
+  it("accepts the real comment opening with Codex's receipt marker", () => {
+    // Codex's clean comment on a sibling repo's pull request (2026-10-15),
+    // verbatim but for the commit: the marker line counted as a third line,
+    // and the gate published FINDINGS over a review that found none.
+    const receipt = [
+      "<!-- codex-review-receipt:v1 -->",
+      "",
+      "Codex Review: Didn't find any major issues. :rocket:",
+      "",
+      "**Reviewed commit:** `5f3881b6c0`",
+      "",
+      "<details> <summary>ℹ️ About Codex in GitHub</summary>",
+      "<br/>",
+      "",
+      "Reviews are triggered when you open a pull request for review.",
+      "</details>",
+    ].join("\n");
+    expect(cleanVerdict(receipt, HEAD)).toBe("head");
+    expect(cleanVerdict(receipt.replace("receipt:v1", "receipt:v2"), HEAD)).toBe("head");
+  });
+
+  it("drops only the receipt marker, and only as the first line", () => {
+    // The shape stays exact: the marker anywhere else, another HTML comment
+    // in its place, or the marker on a findings comment still fails it.
+    const marker = "<!-- codex-review-receipt:v1 -->";
+    const clean = "Codex Review: Didn't find any major issues.";
+    const commit = "**Reviewed commit:** `5f3881b6c0`";
+    expect(cleanVerdict([clean, marker, commit].join("\n\n"), HEAD)).toBe(null);
+    expect(cleanVerdict(["<!-- note -->", clean, commit].join("\n\n"), HEAD)).toBe(null);
+    expect(cleanVerdict([marker, marker, clean, commit].join("\n\n"), HEAD)).toBe(null);
+    expect(cleanVerdict([marker, clean, "However, I found a bug.", commit].join("\n\n"), HEAD)).toBe(null);
+    expect(cleanVerdict([marker, "Codex Review: 2 findings", commit].join("\n\n"), HEAD)).toBe(null);
+    expect(cleanVerdict(marker, HEAD)).toBe(null);
+  });
+
   it("accepts a plain finding written as a continuation, knowingly", () => {
     // "Didn't find any major issues. However, I found a blocking bug." is
     // the exploit both the allowlist and the blacklist this repo tried were
