@@ -570,6 +570,10 @@ export function reviewTableStatus(body, head) {
   return null;
 }
 
+// The marker Codex now opens its review comments with, any version: it names
+// the comment kind and carries no prose.
+const RECEIPT_MARKER = /^<!--[ \t]*codex-review-receipt:v\d+[ \t]*-->$/;
+
 export function cleanVerdict(body, head) {
   const text = String(body ?? "");
   // Validate the WHOLE known structure, not a list of things it must not
@@ -584,11 +588,17 @@ export function cleanVerdict(body, head) {
   //
   // Everything from `<details` on is Codex's boilerplate and is dropped
   // before the shape is checked; what remains must be exactly two content
-  // lines.
+  // lines, after the one HTML marker Codex is known to open with. Since
+  // 2026-10-15 its clean comment starts with `<!-- codex-review-receipt:v1
+  // -->`, and counted as a third line it sent a clean verdict on a sibling
+  // repo's pull request to FINDINGS. Only that marker, alone on the first
+  // line, is dropped: the shape stays exact, so any other HTML comment, or
+  // this one anywhere else, still fails it.
   const lines = text.split(/<details/i)[0]
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l !== "");
+  if (lines.length > 0 && RECEIPT_MARKER.test(lines[0])) lines.shift();
   if (lines.length !== 2) return null;
 
   const headline = /^Codex Review:[ \t]*Didn['’]t find any major issues[.!](.*)$/.exec(lines[0]);
