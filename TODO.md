@@ -11,6 +11,12 @@
       with no arguments applies the standard `lanes codex zizmor` set
       (once the `gate` → `lanes` rename below has also landed).
 
+- [ ] **Check `AGENTS.md` < 24,000 bytes in CI** (mikelward/stopdash#932):
+      AGENTS.md rides the code lane here, so a one-line assertion in
+      `agents-front-matter.test.js` (`Buffer.byteLength(text) < 24000`)
+      would run on every edit to it, keeping it under Antigravity's
+      24,000-byte per-file rule cap, which truncates the tail.
+
 ## Finish the gate → lanes check rename
 
 The consumer-facing required check was renamed from `gate` to `lanes`
