@@ -50,6 +50,7 @@ describe("the lane policy", () => {
       { verdict: "code", pattern: "README.md" },
       { verdict: "code", pattern: "AGENTS.md" },
       { verdict: "code", pattern: "CLAUDE.md" },
+      { verdict: "code", pattern: "GEMINI.md" },
       { verdict: "code", pattern: "TODO.md" },
       { verdict: "code", pattern: "docs/CONSUMER.md" },
       { verdict: "docs", pattern: "**/*.md" },
@@ -75,8 +76,8 @@ describe("the lane policy", () => {
     //
     // README.md embeds the consumer workflow templates action.test.js pins
     // the installed workflows to. AGENTS.md carries the consumer list the
-    // check-consumers sweep is derived from (CLAUDE.md is AGENTS.md by
-    // symlink). TODO.md is asserted to carry the `## Decisions needing
+    // check-consumers sweep is derived from (CLAUDE.md and GEMINI.md are
+    // AGENTS.md by symlink). TODO.md is asserted to carry the `## Decisions needing
     // review` heading the autopilot rule requires. docs/CONSUMER.md has
     // four sections pinned: the fork limitation with its `checks: write`
     // scope, the head's-`codex-review-check` limitation, the dispatch
@@ -91,6 +92,7 @@ describe("the lane policy", () => {
       "README.md",
       "AGENTS.md",
       "CLAUDE.md",
+      "GEMINI.md",
       "TODO.md",
       "docs/CONSUMER.md",
     ]) {
