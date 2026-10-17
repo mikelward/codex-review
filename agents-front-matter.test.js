@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 
 const text = readFileSync(new URL("./AGENTS.md", import.meta.url), "utf8");
 const match = text.match(/^---\n([\s\S]*?)\n---\n/);
@@ -48,4 +48,16 @@ test("front matter carries a last_modified date", () => {
 test("the guide tells agents to report the loaded file at session start", () => {
   assert.match(text, /At\s+the\s+start\s+of\s+every\s+session,\s+print\s+the\s+full\s+absolute\s+path\s+of\s+the\s+`AGENTS\.md`\s+you\s+loaded\s+and\s+its\s+`last_modified`\s+date/);
   assert.match(text, /Bump\s+`last_modified`\s+whenever\s+you\s+edit\s+this\s+file/);
+});
+
+test("CLAUDE.md and GEMINI.md are symlinks to AGENTS.md", () => {
+  // Every agent reads the same rules only while these stay links: a deleted
+  // or retargeted one leaves Claude or Gemini loading a stale or missing
+  // guide while AGENTS.md itself still reads fine. lstatSync throws on a
+  // missing file, so a deleted link fails here too.
+  for (const name of ["CLAUDE.md", "GEMINI.md"]) {
+    const path = new URL(`./${name}`, import.meta.url);
+    assert.ok(lstatSync(path).isSymbolicLink(), `${name} must be a symlink`);
+    assert.equal(readlinkSync(path), "AGENTS.md", `${name} must point at AGENTS.md`);
+  }
 });
