@@ -26,6 +26,7 @@ import {
   cleanVerdict,
   UNANSWERED,
   UNANSWERED_FORK,
+  reviewTableRow,
   reviewTableStatus,
   signAppJwt,
   appToken,
@@ -245,6 +246,7 @@ describe("readReactions", () => {
       unverifiedApproval: false,
       held: null,
       reading: false,
+      readingAt: null,
     });
   });
 
@@ -305,6 +307,7 @@ describe("readReactions", () => {
       unverifiedApproval: false,
       held: null,
       reading: true,
+      readingAt: "2026-08-14T12:05:00Z",
     });
   });
 
@@ -313,7 +316,7 @@ describe("readReactions", () => {
       read([react(CODEX, "THUMBS_UP"), react(CODEX, "EYES")]),
     ).toEqual({
       approved: true, approvedAt: "2026-08-14T12:05:00Z", staleApproval: false, unverifiedApproval: false,
-      held: null, reading: true,
+      held: null, reading: true, readingAt: "2026-08-14T12:05:00Z",
     });
   });
 
@@ -331,6 +334,7 @@ describe("readReactions", () => {
       unverifiedApproval: false,
       held: null,
       reading: false,
+      readingAt: null,
     });
   });
 });
@@ -601,6 +605,8 @@ const page = (nodes, hasNextPage = false, endCursor = null) => ({
 const GATED_AT = "2026-08-14T12:00:00Z";
 const AFTER = "2026-08-14T12:05:00Z";
 const BEFORE = "2026-08-14T11:00:00Z";
+// After a Codex 👀 (`hold` stamps AFTER): when its status table was last edited.
+const EDITED = "2026-08-14T12:07:00Z";
 
 // Codex's status-table comment, in the shape observed live on 2026-09-02:
 // a row per review kind, each naming its own commit, with the security row
@@ -1226,6 +1232,257 @@ describe("sweep", () => {
       ])],
     });
     expect((await runFull(fake)).awaiting).toBe(1);
+  });
+
+  it("approves a clean head while only a security review keeps Codex's 👀 up", async () => {
+    // Observed on a sibling repo's pull request: Codex keeps its 👀 on the
+    // body until EVERY review finishes, and its security review sat `Running` for hours on a
+    // commit the pull request had left, while the code review of the head
+    // was `Completed` and clean. The security review gates nothing, so its
+    // read must not hold the head: the 👀 stops counting as reading once
+    // this head's code-review row is done, and the clean comment approves.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [
+          {
+            user: { login: `${CODEX_BOT}[bot]`, type: "Bot" },
+            created_at: BEFORE,
+            updated_at: EDITED,
+            body: summaryTable({ status: "Completed", commit: "abc1234", security: "Running" }),
+          },
+          {
+            user: { login: `${CODEX_BOT}[bot]` },
+            created_at: "2026-08-14T12:06:00Z",
+            body: "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `abc1234`",
+          },
+        ],
+      },
+      graphqlResponses: [repoPRs([
+        prNode({ reactions: page([hold("EYES", `${CODEX_BOT}[bot]`)]) }),
+      ])],
+    });
+    const out = await runFull(fake);
+    expect(out.written[0].state).toBe("success");
+  });
+
+  it("does not trust a Completed row older than Codex's newest 👀", async () => {
+    // A re-review on an unchanged head raises the 👀 before the table is
+    // edited back to `Running`. In that window the `Completed` row is the
+    // previous review's, so the head is still being read.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [
+          {
+            user: { login: `${CODEX_BOT}[bot]`, type: "Bot" },
+            created_at: BEFORE,
+            body: summaryTable({ status: "Completed", commit: "abc1234", security: "Running" }),
+          },
+          {
+            user: { login: `${CODEX_BOT}[bot]` },
+            created_at: AFTER,
+            body: "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `abc1234`",
+          },
+        ],
+      },
+      graphqlResponses: [repoPRs([
+        prNode({ reactions: page([hold("EYES", `${CODEX_BOT}[bot]`)]) }),
+      ])],
+    });
+    const out = await runFull(fake);
+    expect(out.written).toEqual([]);
+    expect(out.awaiting).toBe(1);
+  });
+
+  it("does not let a clean comment from before the 👀 answer the re-read", async () => {
+    // A re-review of an unchanged head: the table can read `Completed`
+    // before the new verdict posts. The clean comment from the previous
+    // review names the same commit but predates the 👀, so it is not this
+    // re-read's answer and approves nothing.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [
+          {
+            user: { login: `${CODEX_BOT}[bot]`, type: "Bot" },
+            created_at: BEFORE,
+            updated_at: EDITED,
+            body: summaryTable({ status: "Completed", commit: "abc1234", security: "Running" }),
+          },
+          {
+            user: { login: `${CODEX_BOT}[bot]` },
+            created_at: "2026-08-14T12:01:00Z",
+            body: "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `abc1234`",
+          },
+        ],
+      },
+      graphqlResponses: [repoPRs([
+        prNode({ reactions: page([hold("EYES", `${CODEX_BOT}[bot]`)]) }),
+      ])],
+    });
+    const out = await runFull(fake);
+    expect(out.written.every((w) => w.state !== "success")).toBe(true);
+  });
+
+  it("does not let a 👍 from before the 👀 answer the re-read", async () => {
+    // The reaction path of the case above: a 👍 left beside a newer 👀 is
+    // the previous review's verdict, whatever the table now says.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      checkSuites: { abc1234: [bornSuite()] },
+      issueComments: {
+        1: [{
+          user: { login: `${CODEX_BOT}[bot]`, type: "Bot" },
+          created_at: BEFORE,
+          updated_at: EDITED,
+          body: summaryTable({ status: "Completed", commit: "abc1234", security: "Running" }),
+        }],
+      },
+      graphqlResponses: [repoPRs([
+        prNode({ reactions: page([
+          thumbs(`${CODEX_BOT}[bot]`, "2026-08-14T12:03:00Z"),
+          hold("EYES", `${CODEX_BOT}[bot]`),
+        ]) }),
+      ])],
+    });
+    const out = await runFull(fake);
+    expect(out.written.every((w) => w.state !== "success")).toBe(true);
+  });
+
+  it("keeps polling a re-read whose answer has not landed past an older finding", async () => {
+    // A re-review of a head that had findings, with the table already
+    // `Completed` and the new verdict not yet visible: the old review must
+    // not settle the clock, since the re-read may end in a 👍 that no
+    // webhook announces.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      prReviews: { 1: [review("abc1234", `${CODEX_BOT}[bot]`, "2026-08-14T12:01:00Z")] },
+      issueComments: {
+        1: [{
+          user: { login: `${CODEX_BOT}[bot]`, type: "Bot" },
+          created_at: BEFORE,
+          updated_at: EDITED,
+          body: summaryTable({ status: "Completed", commit: "abc1234", security: "Running" }),
+        }],
+      },
+      graphqlResponses: [repoPRs([
+        prNode({ reactions: page([hold("EYES", `${CODEX_BOT}[bot]`)]) }),
+      ])],
+    });
+    const out = await runFull(fake);
+    expect(out.written.every((w) => w.state !== "success")).toBe(true);
+    expect(out.awaiting).toBe(1);
+  });
+
+  it("keeps reading while this head's security row is in a state it can't read", async () => {
+    // Fail closed: a security row about THIS head in an unknown state (say
+    // `Queued`) may still post a finding, so it holds like `Running` does.
+    // Only no row about this head, or a `Completed` one, lets the 👀 go.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [
+          {
+            user: { login: `${CODEX_BOT}[bot]`, type: "Bot" },
+            created_at: BEFORE,
+            updated_at: EDITED,
+            body: summaryTable({ status: "Completed", commit: "abc1234", security: "Queued", securityCommit: "abc1234" }),
+          },
+          {
+            user: { login: `${CODEX_BOT}[bot]` },
+            created_at: "2026-08-14T12:06:00Z",
+            body: "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `abc1234`",
+          },
+        ],
+      },
+      graphqlResponses: [repoPRs([
+        prNode({ reactions: page([hold("EYES", `${CODEX_BOT}[bot]`)]) }),
+      ])],
+    });
+    const out = await runFull(fake);
+    expect(out.written.every((w) => w.state !== "success")).toBe(true);
+  });
+
+  it("keeps a clean head reading while a security review of that head runs", async () => {
+    // A security review running on THIS head may still post a finding about
+    // it, and a finding blocks: the 👀 keeps counting until it lands.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [
+          {
+            user: { login: `${CODEX_BOT}[bot]`, type: "Bot" },
+            created_at: BEFORE,
+            updated_at: EDITED,
+            body: summaryTable({ status: "Completed", commit: "abc1234", security: "Running", securityCommit: "abc1234" }),
+          },
+          {
+            user: { login: `${CODEX_BOT}[bot]` },
+            created_at: AFTER,
+            body: "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `abc1234`",
+          },
+        ],
+      },
+      graphqlResponses: [repoPRs([
+        prNode({ reactions: page([hold("EYES", `${CODEX_BOT}[bot]`)]) }),
+      ])],
+    });
+    const out = await runFull(fake);
+    expect(out.written).toEqual([]);
+    expect(out.awaiting).toBe(1);
+  });
+
+  it("does not read a completed code-review row as a clean verdict", async () => {
+    // The other direction: `Completed` says the answer is written, not what
+    // it says. With the 👀 discounted and nothing clean on this head, the
+    // head stays pending -- never success.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [{
+          user: { login: `${CODEX_BOT}[bot]`, type: "Bot" },
+          created_at: BEFORE,
+          updated_at: EDITED,
+          body: summaryTable({ status: "Completed", commit: "abc1234", security: "Running" }),
+        }],
+      },
+      graphqlResponses: [repoPRs([
+        prNode({ reactions: page([hold("EYES", `${CODEX_BOT}[bot]`)]) }),
+      ])],
+    });
+    const out = await runFull(fake);
+    expect(out.written.every((w) => w.state !== "success")).toBe(true);
+    expect(out.awaiting).toBe(1);
+  });
+
+  it("still parks a head whose own code review is running", async () => {
+    // A security row done and the code row running is still a read in
+    // progress: the 👀 keeps counting, and a clean comment from before the
+    // re-read cannot approve over it.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [
+          {
+            user: { login: `${CODEX_BOT}[bot]`, type: "Bot" },
+            created_at: BEFORE,
+            body: summaryTable({ status: "Running", commit: "abc1234", securityCommit: "abc1234" }),
+          },
+          {
+            user: { login: `${CODEX_BOT}[bot]` },
+            created_at: AFTER,
+            body: "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `abc1234`",
+          },
+        ],
+      },
+      graphqlResponses: [repoPRs([
+        prNode({ reactions: page([hold("EYES", `${CODEX_BOT}[bot]`)]) }),
+      ])],
+    });
+    const out = await runFull(fake);
+    expect(out.written).toEqual([]);
+    expect(out.awaiting).toBe(0);
   });
 
   it("stops the clock once Codex has returned findings for the head", async () => {
@@ -3692,6 +3949,20 @@ describe("reviewTableStatus", () => {
       .filter((l) => !l.includes("Code Review"))
       .join("\n");
     expect(reviewTableStatus(body, "7284e2e8f880ff0a93d3549c5c852f4940d72f07")).toBeNull();
+  });
+
+  it("reads the security row when asked for it, by its own commit", () => {
+    const body = summaryTable({ status: "Completed", commit: "b9f8d32", security: "Running", securityCommit: "0beef12" });
+    expect(reviewTableStatus(body, "0beef12aa", "Security Review")).toBe("running");
+    expect(reviewTableStatus(body, HEAD, "Security Review")).toBeNull();
+    expect(reviewTableStatus(body, HEAD)).toBe("completed");
+  });
+
+  it("tells a row about another commit from one about this head it can't read", () => {
+    const other = summaryTable({ status: "Completed", commit: "b9f8d32", security: "Queued", securityCommit: "0beef12" });
+    expect(reviewTableRow(other, HEAD, "Security Review")).toBeNull();
+    const mine = summaryTable({ status: "Completed", commit: "b9f8d32", security: "Queued", securityCommit: "b9f8d32" });
+    expect(reviewTableRow(mine, HEAD, "Security Review")).toEqual({ status: null });
   });
 
   it("refuses a status word it does not know", () => {

@@ -209,7 +209,12 @@ review threads. Any unresolved thread Codex opened as a security finding keeps
 the head at `pending`, with the description `Codex left a security finding —
 address it and resolve its thread`. Nothing waits on the security review
 itself: if it is out of quota, not enabled, or never answers, it leaves no
-thread, and the code review's verdict stands alone. Resolving a thread sends
+thread, and the code review's verdict stands alone. That includes Codex's own
+👀, which it keeps on the pull request until every review finishes: once its
+status table, edited since that 👀, says the code review of this head is
+complete, a security review
+still running on an older commit no longer holds the head. One running on this
+head still does, since it may yet post a finding about it. Resolving a thread sends
 no event the listener relays, so a head held only by this stays on the minute
 clock for the usual window. After that, the next comment, push or scheduled
 sweep picks up the resolution.

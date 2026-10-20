@@ -541,7 +541,20 @@ export const SUMMARY_MARKER = "codex-pull-request-review-summary";
  * and its `headSha` goes stale the same way -- so neither the comment nor
  * that marker has a single head, and only the row does.
  */
-export function reviewTableStatus(body, head) {
+export function reviewTableStatus(body, head, kind = "Code Review") {
+  return reviewTableRow(body, head, kind)?.status ?? null;
+}
+
+/**
+ * The row of `kind` in Codex's status table when it names this head:
+ * `{ status }`, with `status` as `reviewTableStatus` reads it (null for a
+ * word it does not know). Null where no such row names this head -- which
+ * is what tells a row about another commit, or no row, from one about this
+ * head in a state nobody enumerated: the first says nothing about this
+ * head, the second says something unread, and only the first is safe to
+ * ignore.
+ */
+export function reviewTableRow(body, head, kind = "Code Review") {
   const text = String(body ?? "");
   if (!text.includes(SUMMARY_MARKER)) return null;
   // Everything from `<details` on is Codex's boilerplate footer, dropped
@@ -555,7 +568,7 @@ export function reviewTableStatus(body, head) {
     // `| a | b | c |` -> ["", " a ", " b ", " c ", ""], so the ends drop.
     const cells = row.split("|").slice(1, -1).map((c) => c.trim());
     if (cells.length < 3) continue;
-    if (!/\bCode Review\b/.test(cells[0])) continue;
+    if (!cells[0].includes(kind)) continue;
     const named = /`([0-9a-f]{7,40})`/.exec(cells[2])?.[1];
     if (!named) return null;
     // The abbreviation is Codex's -- seven characters here where the API
@@ -563,9 +576,9 @@ export function reviewTableStatus(body, head) {
     // collide, exactly as `cleanVerdict` does: the named id must be a
     // prefix of the full head, never the reverse.
     if (!head || !String(head).toLowerCase().startsWith(named.toLowerCase())) return null;
-    if (/\*\*Running\*\*/.test(cells[1])) return "running";
-    if (/\*\*Completed\*\*/.test(cells[1])) return "completed";
-    return null;
+    if (/\*\*Running\*\*/.test(cells[1])) return { status: "running" };
+    if (/\*\*Completed\*\*/.test(cells[1])) return { status: "completed" };
+    return { status: null };
   }
   return null;
 }
@@ -633,14 +646,34 @@ export function cleanVerdict(body, head) {
  * able to spend the maintainer's verdict latency either.
  */
 export async function codeReviewTableStatus(api, { owner, name, number, head }) {
+  return (await reviewTableRows(api, { owner, name, number, head }))?.code ?? null;
+}
+
+/**
+ * The table's code row for this head, with the security row for the same
+ * head and when the comment was last edited -- or null where no table
+ * names this head's code review. The edit time is what lets a `Completed`
+ * row be trusted against Codex's 👀: a re-review on an unchanged head puts
+ * the 👀 up before the table is edited back to `Running`, and in that
+ * window the old `Completed` is stale.
+ */
+export async function reviewTableRows(api, { owner, name, number, head }) {
   for (let page = 1; ; page += 1) {
     const batch = await api.rest(
       `/repos/${owner}/${name}/issues/${number}/comments?per_page=100&page=${page}`,
     );
     for (const c of batch ?? []) {
       if (!matchesBot(c.user)) continue;
-      const status = reviewTableStatus(c.body, head);
-      if (status) return status;
+      const code = reviewTableStatus(c.body, head);
+      if (!code) continue;
+      const security = reviewTableRow(c.body, head, "Security Review");
+      return {
+        code,
+        // `"absent"` -- no security row names this head -- is distinct from
+        // a row about this head in a state this file does not know (null).
+        security: security ? security.status : "absent",
+        editedAt: utc(c.updated_at ?? c.created_at),
+      };
     }
     if (!batch || batch.length < 100) return null;
   }
@@ -1100,6 +1133,7 @@ export function readReactions(nodes, { since, owner } = {}) {
   let unverifiedApproval = false;
   let held = null;
   let reading = false;
+  let readingAt = null;
   const bound = utc(since);
   for (const r of nodes ?? []) {
     const login = r.user?.login;
@@ -1148,9 +1182,12 @@ export function readReactions(nodes, { since, owner } = {}) {
     // is what keeps the minute loop polling — Codex swaps 👀 for 👍 with no
     // webhook, and a loop that had already gone idle would leave that 👍
     // waiting on the throttled schedule.
-    if (r.content === "EYES" && codex) reading = true;
+    if (r.content === "EYES" && codex) {
+      reading = true;
+      if (readingAt === null || at > readingAt) readingAt = at;
+    }
   }
-  return { approved, approvedAt, staleApproval, unverifiedApproval, held, reading };
+  return { approved, approvedAt, staleApproval, unverifiedApproval, held, reading, readingAt };
 }
 
 /**
@@ -1915,7 +1952,32 @@ export async function sweep({
         }
       }
     }
-    const { approved, approvedAt, held, reading } = seen;
+    const { approved, approvedAt, held } = seen;
+    // Codex's 👀 means ANY of its reviews is running, not the code review:
+    // it keeps the reaction up until every row of its status table reads
+    // `Completed`. Its security review runs at open, not per push, and has
+    // been seen stuck `Running` for hours, on a sibling repo's pull request,
+    // on a commit that pull request had already left. A security FINDING
+    // blocks, through its thread (`unresolvedSecurityFindings`); a security
+    // review that never finishes must not (maintainer, 2026-10-20). So once the table says
+    // THIS head's code review is done, the 👀 still counts as reading only
+    // while a security review is running on this same head -- one that may
+    // yet post a finding about it. `Completed` is still not a verdict: the
+    // walk below decides, exactly as for a head with no reaction at all.
+    // And only a table edited AFTER the newest Codex 👀: a re-review on an
+    // unchanged head raises the 👀 before the row goes back to `Running`,
+    // and an older `Completed` describes the review before it.
+    const rows = seen.reading && !sharedHead && !held
+      ? await reviewTableRows(api, {
+        owner, name, number: node.number, head: node.headRefOid,
+      })
+      : null;
+    const table = rows?.code ?? null;
+    const codeDone = table === "completed"
+      && (rows.security === "absent" || rows.security === "completed")
+      && rows.editedAt !== null && seen.readingAt !== null && rows.editedAt > seen.readingAt;
+    const reading = seen.reading && !codeDone;
+    const discountedReadAt = seen.reading && !reading ? seen.readingAt : null;
     // A generated-only push onto an approved head inherits that approval;
     // read only once the lanes engine has published the claim, and never
     // for a shared head, which fails closed above whatever it inherits.
@@ -1991,7 +2053,13 @@ export async function sweep({
       // because Codex re-adds it after a re-read, but a comment is a fixed
       // point in time and has to be compared as one.
       const answeredElsewhereAt = laterOf(reviewedAt, codexAt);
-      const cleanIsLatest = Boolean(signals.cleanAt)
+      // A 👀 discounted above still dates the re-read it started: only a
+      // clean comment newer than it answers that re-read. One from before is
+      // the previous review's, and the new verdict may not have landed yet
+      // when the table already reads `Completed`.
+      const cleanAnswersRead = discountedReadAt === null
+        || (Boolean(signals.cleanAt) && signals.cleanAt > discountedReadAt);
+      const cleanIsLatest = Boolean(signals.cleanAt) && cleanAnswersRead
         && (answeredElsewhereAt === null || signals.cleanAt > answeredElsewhereAt);
       // The 👍 gets the same latest-word test as the clean comment. The
       // reaction can outrank an OLDER findings review — after a fix-and-nudge
@@ -2003,7 +2071,10 @@ export async function sweep({
       // unaddressed finding standing. A tie is an unresolved ordering —
       // GitHub stamps to the second — and ambiguity must not be what opens
       // the gate, the same rule the nudge tie already follows.
+      // And, like the clean comment, newer than a discounted 👀: a 👍 left
+      // from before a re-read is the previous review's.
       const approvedIsLatest = approved
+        && (discountedReadAt === null || (approvedAt !== null && approvedAt > discountedReadAt))
         && (answeredElsewhereAt === null
           || (approvedAt !== null && approvedAt > answeredElsewhereAt));
       cleanlyApproved = approvedIsLatest || cleanIsLatest;
@@ -2085,9 +2156,6 @@ export async function sweep({
     // about a different commit -- keeps the old behavior, so a shape that
     // stops matching costs polling rather than correctness.
     if (reading) {
-      const table = await codeReviewTableStatus(api, {
-        owner, name, number: node.number, head: node.headRefOid,
-      });
       if (table === "running") {
         log(`#${node.number}: Codex is still reading this head and says so — parking until it says otherwise`);
         return 0;
@@ -2099,7 +2167,11 @@ export async function sweep({
     // Codex may answer that with a 👍, which no webhook announces. A tie
     // counts as unanswered, as it does for the nudge.
     const askOpen = Boolean(askAt) && (answeredAt === null || askAt >= answeredAt);
-    if (verdict.description === FINDINGS && reviewedAt && !askOpen) return 0;
+    // A discounted 👀 is a re-read whose answer may not have landed: a
+    // finding from before it is the previous review's, so it must not stop
+    // the clock while this one's 👍 -- which no webhook announces -- is due.
+    const reReadOpen = discountedReadAt !== null && (answeredAt === null || answeredAt <= discountedReadAt);
+    if (verdict.description === FINDINGS && reviewedAt && !askOpen && !reReadOpen) return 0;
     // SECURITY deliberately keeps the clock, unlike FINDINGS. What clears it
     // is a thread being resolved, and resolving emits nothing the listener
     // hears, so polling is the only way to see it. The age path below still
