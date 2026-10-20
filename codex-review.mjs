@@ -579,10 +579,13 @@ export function reviewTableStatus(body, head) {
  *
  * - `status` is `"running"` or `"completed"` (or null for a word this file
  *   does not know, which neither parks nor approves).
- * - `findings` is the state's `has_any_findings`: `false` is Codex saying
- *   that review of this commit found nothing -- the clean pass that leaves
- *   no comment and no review, only a 👍 that names no commit. Anything but
- *   `false` is not clean.
+ * - `findings` is the state's `has_unresolved_findings`: `false` is Codex
+ *   saying nothing it found on this pull request is still open -- the clean
+ *   pass that leaves no comment and no review, only a 👍 that names no
+ *   commit. Not `has_any_findings`, which counts every finding the pull
+ *   request ever drew, so a thread answered and resolved would hold every
+ *   later head forever. A state without the field falls back to
+ *   `has_any_findings`. Anything but `false` is not clean.
  * - `at` is when that row says it completed (or started), the time a clean
  *   answer is ordered by against findings and nudges.
  *
@@ -615,7 +618,9 @@ export async function codexCodeReview(api, { owner, name, number, head, log = ()
         const agreed = status !== null && row?.status === status;
         return {
           status: agreed ? status : null,
-          findings: code.has_any_findings,
+          findings: typeof code.has_unresolved_findings === "boolean"
+            ? code.has_unresolved_findings
+            : code.has_any_findings,
           at: agreed ? row.at : null,
         };
       }

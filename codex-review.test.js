@@ -466,13 +466,18 @@ const summaryTable = ({ status, commit, security = "Completed", securityCommit =
 // review found anything, and the table row carries its time. The default is
 // the clean pass Codex leaves no other comment for.
 const codexTable = ({
-  commit = "abc1234", status = "completed", findings = false, at = AFTER,
+  commit = "abc1234", status = "completed", findings = false, anyFindings = false, at = AFTER,
   security = "completed", securityCommit = "0beef12",
 } = {}) => {
   const word = { completed: "Completed", running: "Running" }[status] ?? status;
   const sword = { completed: "Completed", running: "Running" }[security] ?? security;
   const state = {
-    code_review: { commit_sha: commit, has_any_findings: status === "completed" ? findings : null, status },
+    code_review: {
+      commit_sha: commit,
+      has_any_findings: status === "completed" ? findings || anyFindings : null,
+      has_unresolved_findings: status === "completed" ? findings : null,
+      status,
+    },
     security_review: { commit_sha: securityCommit, has_any_findings: null, status: security },
   };
   return [
@@ -1618,6 +1623,19 @@ describe("sweep", () => {
     const out = await runFull(fake);
     expect(out.awaiting).toBe(1);
     expect(out.written).toEqual([]);
+  });
+
+  it("approves a head whose findings were answered and resolved since", async () => {
+    // Codex's state keeps `has_any_findings` true once a pull request has
+    // drawn a finding; a later review of the head, with the thread
+    // resolved, says nothing is unresolved, and that later word is clean.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      prReviews: { 1: [review("abc1234", `${CODEX_BOT}[bot]`, "2026-08-14T12:01:00Z")] },
+      issueComments: { 1: [codexSummary({ anyFindings: true, at: "2026-08-14T12:10:00Z" })] },
+      graphqlResponses: [repoPRs([prNode()])],
+    });
+    expect((await run(fake))[0].state).toBe("success");
   });
 
   it("parks a re-read of a head with findings until the table says it is done", async () => {
@@ -3245,7 +3263,7 @@ describe("input", () => {
 describe("reviewState", () => {
   it("reads the machine-readable state Codex keeps beside the table", () => {
     expect(reviewState(codexTable({ commit: "abc1234" })).code_review).toEqual({
-      commit_sha: "abc1234", has_any_findings: false, status: "completed",
+      commit_sha: "abc1234", has_any_findings: false, has_unresolved_findings: false, status: "completed",
     });
   });
 
@@ -3284,6 +3302,21 @@ describe("codexCodeReview", () => {
 
   it("says nothing about another commit", async () => {
     expect(await read([codexSummary({ commit: "0beef12" })])).toBeNull();
+  });
+
+  it("reads a pull request whose only findings were resolved as clean", async () => {
+    // Codex keeps `has_any_findings` true for good once a pull request has
+    // drawn a finding; only `has_unresolved_findings` drops once the thread
+    // is answered and resolved. Reading the first held every later head.
+    expect(await read([codexSummary({ anyFindings: true })]))
+      .toEqual({ status: "completed", findings: false, at: AFTER });
+    expect(await read([codexSummary({ findings: true })]))
+      .toEqual({ status: "completed", findings: true, at: AFTER });
+  });
+
+  it("falls back to any findings where the state has no unresolved count", async () => {
+    const body = codexTable({ anyFindings: true }).replace(',"has_unresolved_findings":false', "");
+    expect((await read([{ ...codexSummary(), body }])).findings).toBe(true);
   });
 
   it("reads neither status where the row disagrees with the state", async () => {
