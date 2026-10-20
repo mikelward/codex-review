@@ -84,9 +84,8 @@ ref* — so a branch could ship its own version of a job holding
 version does not help when the branch supplies the job around it.
 
 `pull_request_target` does not have that hole: GitHub takes the definition from
-the **base** ref. It is also the event-driven start for a push, since reactions
-emit no webhook at all — without it, the first push after a quiet spell waits
-for a scheduled fire, which on the four-hourly backstop is up to four hours
+the **base** ref. It is also the event-driven start for a push — without it,
+the first push after a quiet spell waits for a scheduled fire, which on the four-hourly backstop is up to four hours
 rather than the 10–37 measured minutes a throttled hourly cron used to give.
 
 Each type earns its place:
@@ -104,7 +103,7 @@ Each type earns its place:
 The comment events (`issue_comment`, `pull_request_review_comment`, both on
 `[created, edited]`) cover the round that has no push: a finding rebutted on
 the same head plus an `@codex review` nudge changes the verdict with no
-`pull_request` event anywhere, and the reactions that follow emit nothing. The
+`pull_request` event anywhere. The
 `edited` type is there because a nudge can be edited into an existing comment,
 and the sweep dates such an ask by its edit time. They are declared on the
 **listener**, not here, and reach the sweep through the relay below.
@@ -115,7 +114,7 @@ Three deliveries arrive on events whose workflow definition GitHub resolves
 against a ref a pull request branch controls:
 
 - **A review with no inline comments.** Codex sometimes delivers findings that
-  way, and it emits neither comment event and no reaction, so nothing else
+  way, and it emits no comment event, so nothing else
   hears it. The event is `pull_request_review`, resolved against the pull
   request's own merge ref.
 - **The comment events**, which are **NOT base-ref-pinned** — easy to assume
@@ -217,8 +216,8 @@ queue behind it — to the 6-hour job default, stalling the gate silently.
 
 Events start a run within seconds; the run polls every minute for up to ~55.
 Codex also edits its review summary comment in place as a review starts and
-finishes, and that edit is an `issue_comment` the listener relays — so even a
-verdict that emits no reaction of its own usually announces itself. Everything
+finishes, and that edit is an `issue_comment` the listener relays — so every
+verdict announces itself. Everything
 the schedule alone catches is rare and fails **closed** — a dropped webhook
 leaves the new head pending — and any comment on the pull request clears those
 on demand.
@@ -274,16 +273,16 @@ Neither can be expressed in a workflow file.
    this check red or absent, leaving the gate quietly misconfigured. A check
    nobody requires is a comment.
 2. **Require branches to be up to date before merging.** Codex's verdict is
-   derived from its reaction to the pull request, and the action never reads
-   the pull request's base at all. So when the base advances, the reviewed
+   a review of the head commit, and the action never reads the pull
+   request's base at all. So when the base advances, the reviewed
    merge result changes while the head SHA — and the status hanging off it —
    stand still, and `codex: success` stays standing and stays mergeable. No
    workflow trigger fixes this: a sweep started by a push to the default branch
-   would read the same unrevoked 👍 and republish the same `success`.
-   Requiring up-to-date branches is what observes the base moving: the pull
-   request goes `behind`, updating it pushes a new head, and that revokes the
-   reaction, clears the status by absence, and starts a fresh sweep through
-   `synchronize`.
+   would read the same review of the same head and republish the same
+   `success`. Requiring up-to-date branches is what observes the base moving:
+   the pull request goes `behind`, updating it pushes a new head, which no
+   review names yet, and that clears the status by absence and starts a fresh
+   sweep through `synchronize`.
 
 Requiring (1) without (2) leaves exactly the window (2) closes, and requiring
 either without (3) leaves the files they depend on editable by any pull
@@ -370,20 +369,10 @@ the self-published `codex-review-check` rather than the reusable-workflow
 context `codex-review-check / codex-review-check`, which is a ruleset edit in
 each of them — cheapest while few consumers require it.
 
-**That is half the gate, and the other half is deliberate.** A fork pull
-request would still fail the required `codex` status, for an unrelated reason
-of its own: the sweep dates a head's arrival on its branch from the head's
-check suites, and GitHub reports `head_branch: null` for a fork head's suites,
-so a fork head is undatable forever and `judge` fails it closed — a fork's 👍
-never opens the gate, however fresh. That floor is what stops the previous
-head's lingering 👍 approving a commit nobody reviewed on a fast-forward, and
-an earlier exemption that fell back to the status bound was a fail-open hole
-wearing a compatibility excuse, so it is not a line to delete on the way past.
-Doing this remedy alone therefore removes one unsatisfiable required check and
-leaves the other standing: fork contributions still merge by admin override or
-by re-pushing to a same-repo branch, where every floor applies. Anyone taking
-fork support seriously needs both changes, and the `codex` one first, since it
-is the one with a way to get the answer wrong.
+**A fork head's verdict is judged like any other.** Codex's status table
+names the commit it read, so nothing has to date a fork head's arrival, and a
+clean review of a fork head publishes `success` once the check above can
+report for it.
 
 **Do not fix it with a plain `pull_request` trigger.** That loads the job
 definition from the pull request's merge ref, so a fork could replace the call

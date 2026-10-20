@@ -57,20 +57,17 @@ theoretical collision.
       at the same commit, open a new one — and there is no force-push event on
       the new pull request, so no floor: `forBranch` returns the previous
       life's suite and the fresh arrival is dated too early. It then parks on
-      its first sweep, before Codex's pickup window opens, and a reaction-only
-      answer waits for an event or the schedule.
+      its first sweep, before Codex's pickup window opens. Cheap now: Codex's
+      answer is a table edit, an event that wakes the sweep by itself.
       Raised by Codex on PR #37 against the `UNANSWERED` escalation, and real
       — but **not introduced by it**: an inherited `PENDING` parks identically,
       which `parks an inherited marker on a recreated branch exactly as it
       parks PENDING` now pins. The limitation belongs to the arrival-dating
       machinery.
-      Not fixed there because that machinery is also what stops a rewound
-      head's 👍 approving a commit nobody reviewed (see the force-push
-      reasoning inside `checkSuiteBirths`), so widening what counts as an
-      arrival is a change to the approval path's safety, not a local fix. It
-      needs its own change with its own reasoning: probably a floor derived
-      from the pull request's own creation time rather than only from
-      force-pushes.
+      The same machinery establishes the carry's tenure (see
+      `carriedVerdict`), so widening what counts as an arrival needs its own
+      change with its own reasoning: probably a floor derived from the pull
+      request's own creation time rather than only from force-pushes.
 
 ## Open gap: a transient override costs the park its wording for one window
 
@@ -139,7 +136,9 @@ theoretical collision.
       pull requests among others: one `@codex review` then produces the
       accepted shape, and the gate clears on a head Codex had already passed.
       The reaction is no fallback: that shape withdraws the `eyes` and leaves
-      **no** `+1` behind, so the PR body carries nothing at all.
+      **no** `+1` behind, so the PR body carries nothing at all. The status
+      table now approves a clean pass by itself, but a task summary posted
+      after it is still a later Codex comment, read as findings.
       A third shape appeared on #52: a "## Review Result" heading, "No
       blocking findings.", prose citing permalinks to the head, a
       **Testing** list and a "View task →" link, with no "Reviewed commit"
@@ -239,75 +238,20 @@ refuses until the next verdict on it is written. The description is
 user-visible on the merge gate, which is why it is worth the owner's look:
 a status now reads `Codex reviewed this head, no findings (#41)`.
 
-### A 👍 no longer outranks strictly newer findings on the same head
+### matchesBot requires type evidence for the bare login spelling
 
-**Decided (2026-08-17, security pass):** the reaction now approves only when
-it is strictly newer than Codex's last written word on the head (`judge`
-compares `approvedAt` against the newest review/comment time, the same
-latest-word test the clean comment already got). Before, a standing 👍
-outranked a findings review that arrived AFTER it — Codex provably revokes
-the reaction on push, not on a later findings pass, so the leftover 👍 could
-hand auto-merge a `success` with an unaddressed finding standing. A tie
-fails closed, matching the nudge-tie rule.
-
-**Alternative:** keep the standing order and rely on Codex removing its 👍
-when it posts findings. This file's own history documents Codex not keeping
-its reaction promises, which is why the comment channel got `cleanIsLatest`
-first.
-
-**Reversible:** one condition in `judge` plus three tests; the fix-and-nudge
-round (old findings, fresh 👍) still approves, and a test pins it.
-
-### matchesBot requires type evidence for the bare login spelling — everywhere
-
-**Decided (2026-08-17, security pass; revised 2026-08-18 after Codex
-review; residual closed 2026-09-02):** the suffixed spelling (`…[bot]`)
+**Decided (2026-08-17, security pass):** the suffixed spelling (`…[bot]`)
 certifies itself — brackets are illegal in usernames — but the bare
-spelling needs the account type to say Bot. The first pass asked for that
-evidence on every channel, including GraphQL's `Reaction.user`; Codex
-correctly flagged that field as declared the concrete `User` type rather
-than the polymorphic `Actor` interface, so its `__typename` is a schema
-constant ("User") for every reactor, bot or human — the check could never
-pass, which would have silently blocked Codex's own clean-pass 👍 on every
-consumer forever. So the reaction channel was left attributing by login
-alone, with the residual risk — a same-named human account forging a
-reaction — named at `matchesBotLogin`.
+spelling needs REST's `user.type` to say Bot, or a human account named like
+the bot inherits Codex's verdict authority. Every channel that can approve
+(the status table, reviews, clean comments) is read through REST, where both
+are available. The one GraphQL author left, a security thread's root, is
+matched by login alone: a lookalike there can only hold a head at pending.
 
-**The residual is now closed, and not by adding a field GraphQL does not
-have.** It was never a missing-field problem: it was the wrong channel.
-REST returns the same PR-body reactions with the reactor as a simple-user,
-which spells a bot's login `…[bot]` — self-certifying on its own — and
-carries `user.type` besides. So a 👍 matching by login alone no longer
-approves anything: it flags `unverifiedApproval`, and `judge` re-reads the
-whole list from `restReactions`, where `matchesBot` decides it on the same
-terms as a review or comment author. One extra REST call, paid only while a
-clean pass is actually standing on a head, and none on a sweep with no 👍 in
-play; the rebound readings that used to re-walk the GraphQL pagination now
-cost nothing, so a judged head is no more expensive than before in the
-common case.
+**Alternative:** login only, trusting GitHub's squatting protections, which
+are policy, not API guarantee.
 
-**Still on the login alone: the 👀 — and its cost is not zero.** It cannot
-open the gate (`verdictFor` ranks reading above approval, and a forger
-cannot reach `held`, which keys on the owner's login), so a forged one
-never merges anything. But a reading head is exempt from the unanswered-head
-park, so a forged 👀 pins the minute loop on that head until it is removed:
-a runner bill, which is the same hazard that makes nudges owner-only.
-Verifying it the way the 👍 is verified would cost a REST call per sweep on
-every head under review — the common path — to defend the cheap direction.
-
-- [ ] **Decide whether to verify the 👀 too, on the bounded shape.** Escalate
-      to `restReactions` only once a 👀 has held a head past
-      `UNANSWERED_MINUTES`: a genuine 👀 is answered in minutes, so the call
-      is paid only where the reaction has already become doubtful, and the
-      unbounded runner bill above goes away. Left unbuilt because it changes
-      loop behavior, not just attribution, and this pull request is about
-      attribution.
-
-**Alternative:** trust GitHub's squatting protections, which are policy,
-not API guarantee.
-
-**Reversible:** the escalation is one branch in `judge` plus `restReactions`;
-dropping it returns the reaction channel to login-only attribution.
+**Reversible:** one condition in `matchesBot`.
 
 ### AGENTS.md moved to the code lane
 
@@ -367,9 +311,7 @@ report at all.
 observed against any consumer, and the same-repo evidence points the other
 way), the owner confirmed external forks do not matter today, and the fix
 costs a new write grant in nine callers plus this repository plus a
-required-check rename in each. It is also only half the gate: a fork head
-fails the `codex` status separately and on purpose, because its check suites
-carry no `head_branch` and so never date the head's arrival.
+required-check rename in each.
 
 **Reversible:** entirely. The remedy is written down in full, including the
 scope to use and the `pull_request`-trigger trap to avoid, so implementing it

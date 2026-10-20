@@ -270,15 +270,10 @@ describe("action.yml", () => {
     // push, so publishing against head.sha alone leaves ordinary runs red.
     expect(section).toMatch(/head\.sha \|\| github\.sha/);
     expect(section).toMatch(/loosening the\s+permission scan|loosen the\s+permission scan/);
-    // And that the remedy is only half the gate: the `codex` status blocks a
-    // fork head separately and on purpose, because a fork's check suites
-    // carry no head_branch and so never date the head's arrival. Without
-    // this, an implementer does the whole `checks: write` migration and the
-    // fork pull request is still unmergeable, by a floor they were never
-    // told about.
-    expect(section).toMatch(/head_branch/);
-    expect(section).toMatch(/undatable/);
-    expect(section).toMatch(/admin override/);
+    // And that the remedy is the whole of it: the `codex` status judges a
+    // fork head like any other, since the verdict names its commit.
+    expect(section).toMatch(/fork head's verdict is judged like any other/);
+    expect(section).not.toMatch(/undatable/);
     // And the trap: the obvious fix reopens the hole the check exists for.
     expect(section).toMatch(/Do not fix it with a plain `pull_request` trigger/);
   });

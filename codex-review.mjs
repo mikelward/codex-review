@@ -1,55 +1,46 @@
 // Publishes Codex's review verdict as a commit status, so branch protection
 // can gate on something it can actually see.
 //
-// Codex posts no check run of its own, and its clean pass is only a 👍
-// reaction on the PR body — which emits no webhook. So the verdict is both
-// invisible to protection rules and undeliverable by event: it has to be
-// polled and translated. Without that, auto-merge fires on green CI *before*
-// Codex has looked, and a merged-too-early PR is indistinguishable from a
-// correctly merged one.
+// Codex posts no check run of its own, so its verdict is invisible to
+// protection rules. Without this, auto-merge fires on green CI *before* Codex
+// has looked, and a merged-too-early PR is indistinguishable from a correctly
+// merged one.
 //
-// The reaction is the usual verdict, and that is why this file is small.
-// Codex's own description of itself: "If Codex has suggestions, it will
-// comment; otherwise it will react with 👍." The reaction is therefore present
-// only when it has nothing to say — findings in a review body, in a thread, or
-// in a top-level comment all mean no reaction, and none of them decides the
-// *verdict* here.
+// The verdict is read from what Codex WRITES, each piece tied to the commit
+// it is about:
 //
-// It does not always keep that promise, which is the one exception: a clean
-// comment naming the head it read approves too — see `cleanVerdict`. Twice in
-// one afternoon Codex answered "Didn't find any major issues" as a comment
-// and left the body unreacted, once putting the 👍 on the nudge comment
-// instead, and the gate published FINDINGS over pull requests with no finding
-// on them. A `success` with no reaction on the body is therefore expected.
+// - Its status-table comment (`codexCodeReview`): one comment per pull
+//   request, edited in place, carrying a machine-readable state per review
+//   kind -- the commit it read, `running`/`completed`, and whether it found
+//   anything. A clean pass leaves nothing else: no review, no comment, only
+//   this and a 👍.
+// - Its findings: a submitted review carries the commit id
+//   (`codexReviewedAt`), and a findings comment is bounded by the head's
+//   arrival (`commentSignals`).
+// - A clean comment naming the commit it read (`cleanVerdict`), which Codex
+//   posts when asked with `@codex review`.
 //
-// A submitted review naming the current head is still read,
-// but only for the loop's economics: findings mean the next change is a push,
-// not a reaction, so the minute clock has nothing to catch until then. Codex
-// also revokes the reaction when a new commit lands, so a reaction that is
-// present belongs to the head being looked at, and nothing here has to
-// compare SHAs to establish that.
-//
-// An earlier version parsed review bodies for finding badges, timestamped them
-// against the head, and ranked findings against passes. All of it re-derived
-// what the reaction already says, and two of its bugs pointed the same way:
-// approving without a verdict.
+// A head is approved when Codex's latest word on it is clean. Its reactions
+// decide nothing: the 👍 names no commit and can outlive the head it was
+// about, and the 👀 stays up while ANY of its reviews runs -- a stuck
+// security review included -- so every attempt to time them against each
+// other turned up another case. Every one of the channels above is an
+// `issue_comment` or review event, so an answer wakes the sweep by itself.
 //
 // Human review threads are deliberately not modeled: GitHub's "require
 // conversation resolution" setting does that natively, and better.
 //
-// Reactions run the other way too. Approval is Codex's 👍 *and* no 👀 and no
-// 👎 from the repository owner *and* no owner "@codex review" newer than the
-// 👍 — so a hold costs two seconds from a phone, which is the point: without
-// it auto-merge can land a PR before someone who wanted a look gets one, and
-// there is no other signal that cheap. The nudge case is the same idea one
-// step later: asking Codex to look again means the standing verdict is no
-// longer the one wanted, so the gate closes until the fresh answer lands.
+// The repository owner's reactions run the other way: approval also needs no
+// 👀 and no 👎 from the owner, and no owner "@codex review" newer than Codex's
+// last word -- so a hold costs two seconds from a phone, which is the point:
+// without it auto-merge can land a PR before someone who wanted a look gets
+// one. The nudge case is the same idea one step later: asking Codex to look
+// again means the standing verdict is no longer the one wanted, so the gate
+// closes until the fresh answer lands.
 //
 // Only the owner, because this repo is public: anyone can react, and a hold
 // deliberately outlives head changes, so an unrestricted one lets a passer-by
-// block a PR for as long as they feel like it. Codex's own 👀 counts too —
-// it means "still reading", it clears when it reacts 👍, and it is not a
-// passer-by.
+// block a PR for as long as they feel like it.
 //
 // A hold takes effect within a sweep, NOT immediately, and the difference is
 // the whole point of saying so. Reactions emit no webhook, so nothing can
@@ -72,13 +63,13 @@ export const CONTEXT = "codex";
  * `publish` skips the write when state and description both match what is
  * already on the head, and that skip is what keeps the head's earliest
  * `codex` status — its gate marker — where it is. Rewrite the same status
- * each sweep and the marker moves forward every time, until no reaction can
- * ever be newer than it: the gate stalls for good, on every open pull
- * request at once, with nothing failing to say so.
+ * each sweep and the marker moves forward every time, re-anchoring the
+ * unanswered-head window (see `UNANSWERED_MINUTES`) so it never runs out:
+ * the loop polls every head to its cap, with nothing failing to say so.
  *
- * It says *approve* rather than *review* because a head Codex has reviewed
- * and left findings on sits here too — nothing is waiting for a review by
- * then, only for the 👍.
+ * It says *approve* rather than *review* because a head waiting on a
+ * re-review sits here too — nothing is waiting for a first review by then,
+ * only for the clean answer.
  */
 export const PENDING = "Waiting for Codex to approve this head";
 
@@ -100,7 +91,8 @@ export const FINDINGS = "Codex left findings on this head";
  * head, and a push clears it. A security review runs when the pull request
  * opens, not on every push -- on mikelward/repo#56 one ran against about 40
  * code reviews -- so its finding names a commit the next push leaves behind,
- * and judging per head would let that head's 👍 publish `success` over it.
+ * and judging per head would let that head's clean review publish
+ * `success` over it.
  * Resolving the thread is what clears it, the same act a ruleset requiring
  * conversation resolution already asks for.
  */
@@ -140,23 +132,13 @@ export const UNREADABLE = "Verdict unreadable — failing closed until the sweep
 export const UNANSWERED = "Codex has not answered this head — comment @codex review";
 
 /**
- * The same park on a head whose REACTION cannot be accepted.
- *
- * `checkSuiteBirths` dates a head's arrival from a suite born on its
- * branch, and GitHub reports no `head_branch` for a fork's suites — so a
- * fork head is undatable FOREVER, and `judge` refuses its 👍 by design
- * rather than fall back to a bound an attacker could pre-stamp.
- *
- * Only the reaction, though, and the distinction is the whole wording.
- * `cleanlyApproved` is `approvedIsLatest || cleanIsLatest`, and the second
- * disjunct never consults the suites: an attributable clean COMMENT names
- * the commit it read, which is exactly what the reaction lacks, so it
- * approves a fork head like any other. A re-review can therefore settle
- * this head — it just cannot be settled by a 👍 alone. Saying otherwise
- * sends a maintainer to an admin override past a remedy that works, so the
- * sentence keeps both: the retry first, the override as the fallback.
+ * The park wording an earlier version wrote on fork heads, whose 👍 it
+ * could not accept. Nothing writes it now -- the verdict names its commit,
+ * so a fork head is judged like any other -- but commits still wear it, so
+ * it is still recognized as a marker this loop wrote: never replayed, and
+ * cleared like any other.
  */
-export const UNANSWERED_FORK =
+const LEGACY_FORK_MARKER =
   "A fork head\u0027s 👍 cannot be accepted — comment @codex review, or merge by admin override";
 
 /**
@@ -166,17 +148,12 @@ export const UNANSWERED_FORK =
  * places that care — the sticky read, the age anchor, and the clear — mean
  * "a marker we wrote when we gave up", not any particular sentence.
  */
-const PARKED = new Set([UNANSWERED, UNANSWERED_FORK]);
+const PARKED = new Set([UNANSWERED, LEGACY_FORK_MARKER]);
 
 /**
- * Which park wording is true for this head.
- *
- * Derived from the pull request, never from what the commit already wears:
- * a status belongs to the commit, so the same SHA can be a same-repo head
- * in one pull request's life and a fork head in the next, and only one of
- * the two remedies works at a time.
+ * The park wording for this head: one remedy for every head now.
  */
-const marker = (node) => (node.isCrossRepository ? UNANSWERED_FORK : UNANSWERED);
+const marker = () => UNANSWERED;
 
 /**
  * Consecutive failing sweeps before a head's failure stops being treated as
@@ -192,19 +169,17 @@ export const MAX_FAIL_STREAK = 5;
  * loop alive its full 55 minutes, restarted by the schedule forever. Past
  * this age the head still gates `pending` (nothing fails open), it just
  * stops counting as awaiting: the retry is a nudge or a push, both events
- * that restart the clock. A 👀 is exempt — eyes on means the review
- * genuinely started, and long reads are what the 55-minute loop is for.
+ * that restart the clock. A review the table says is running parks at
+ * once instead: its end is an edit, which wakes the sweep by itself.
  *
  * Thirty, not ten, and the difference was paid for: under a burst of
  * pushes (several amends across sibling repos inside ten minutes) Codex
- * queues, the 👀 does not land until it actually starts, and the answer
- * arrived at minute nine-to-twelve — right at the old park. A parked head
- * has no loop left to see the 👍, the reaction emits no webhook, and the
- * hourly schedule was the next reader: five pull requests sat mergeable
- * for most of an hour on 2026-08-16 for exactly this. The window is a
- * ceiling, not a duration — an answered head ends the loop within a poll
- * interval — so widening it is paid only by a head Codex never answers,
- * once per push, while a too-narrow window recurs as stalled afternoons.
+ * queues, and the answer arrived at minute nine-to-twelve — right at the
+ * old park, when the answer was a 👍 no webhook announced and five pull
+ * requests sat mergeable for most of an hour on 2026-08-16. Every answer
+ * is an event now, so the window matters less, but it is a ceiling, not a
+ * duration — an answered head ends the loop within a poll interval — so
+ * it costs only a head Codex never answers, once per push.
  */
 export const UNANSWERED_MINUTES = 30;
 
@@ -214,43 +189,16 @@ const stripBot = (login) => String(login ?? "").replace(/\[bot\]$/, "");
  * Is this login Codex's, spelled either way REST or GraphQL use? Login only
  * — no type evidence asked for or required, so it never decides a verdict.
  *
- * It is the CANDIDATE test for GraphQL reactions. That channel's
- * `Reaction.user` is declared as the concrete `User` type, not the
- * polymorphic `Actor` interface, so a `__typename` queried on it is a
- * SCHEMA CONSTANT — "User" for every reactor, bot or human — and no type
- * evidence can be had from it at any price. Requiring `Bot` there would
- * not harden the reaction channel; it would silence it, permanently, for
- * exactly the clean-pass 👍 that is Codex's most common answer.
- *
- * So the login match is where the reaction channel STARTS, not where it
- * ends: a 👍 matching by login alone is re-read from REST
- * (`restReactions`), where the same reaction arrives spelled `…[bot]` and
- * carrying `user.type`, and `matchesBot` decides it there. A same-named
- * human account is no longer the accepted residual it once was — it is
- * caught one call later, by the only channel that can see the difference.
- *
- * The 👀 keeps deciding on the login alone, and what that is worth is worth
- * stating exactly. It cannot open the gate: `verdictFor` ranks reading above
- * approval, so a 👀 standing beside a 👍 publishes `pending`, and a forger
- * cannot reach `held` either — that is the owner's login, not Codex's. What
- * a forged 👀 CAN do is keep a head on the clock: a reading head is exempt
- * from the unanswered-head park (see `UNANSWERED_MINUTES`), so it pins the
- * minute loop on that head until the reaction is removed. The cost is a
- * runner bill, not a merge — the same hazard that makes nudges owner-only,
- * and the reason this is a trade rather than a free pass. Verifying it the
- * way the 👍 is verified would cost a REST call per sweep on every head
- * under review, which is the common path; a cheaper shape — verify only
- * once a 👀 has held a head past the park window, where a genuine one has
- * become doubtful anyway — is recorded in TODO.md rather than built
- * unasked.
+ * For GraphQL authors, where no type evidence exists: a review thread's
+ * root author, read to count unresolved security findings. A lookalike
+ * there can only hold a head at pending (see `unresolvedSecurityFindings`).
  */
 export const matchesBotLogin = (login, botLogin = CODEX_BOT) => stripBot(login) === stripBot(botLogin);
 
 /**
  * Is this actor Codex? Takes the whole user object where the caller has one.
- * For REST-sourced actors ONLY (review authors, comment authors, and
- * reactions read back through `restReactions`) — see `matchesBotLogin` for
- * a GraphQL reaction, where no type evidence exists to check.
+ * For REST-sourced actors ONLY (review and comment authors) — see
+ * `matchesBotLogin` for a GraphQL author, where no type evidence exists.
  *
  * The login alone is not enough for the bare spelling: app slugs and
  * usernames are separate namespaces, so a HUMAN account named like the bot
@@ -275,7 +223,7 @@ export const matchesBot = (user, botLogin = CODEX_BOT) => {
  * Every time comparison in this file is lexicographic, which is only sound
  * while both sides are UTC strings in the same shape. Today they all are —
  * REST returns UTC "Z", and the GraphQL fields used here (`committedDate`,
- * reaction `createdAt`) are `DateTime`, defined as UTC — so this changes
+ * reaction and timeline `createdAt`) are `DateTime`, defined as UTC — so this changes
  * nothing at runtime. It exists because GraphQL also has the
  * offset-preserving `GitTimestamp` (`committer.date`, `author.date`), and
  * one future edit swapping such a field in would make every string
@@ -317,8 +265,8 @@ export const newestIn = (connection) =>
  * The newest Codex review of exactly this head in a REST batch, or null.
  *
  * The review's own commit id is the tie to the head, so no time guard is
- * needed (unlike reactions, which outlive pushes until Codex revokes them):
- * a new push changes the head oid and every earlier review stops matching.
+ * needed: a new push changes the head oid and every earlier review stops
+ * matching.
  * This also covers standalone inline comments — GitHub wraps every inline
  * comment in a review record (creating a COMMENTED one when none was
  * submitted), so there is no review-comment finding without a review here.
@@ -335,15 +283,12 @@ export function findingsOn(reviews, headRefOid, since = null) {
     // thing that changes — but a RETARGET changes the diff underneath an
     // unchanged head, so its own review records have to be dropped too.
     // Leaving them in does not open the gate (findings hold it closed) but
-    // it settles the head as answered, which stops the minute loop and
-    // leaves a later clean 👍 — which emits no webhook — unseen until the
-    // hourly sweep.
+    // it settles the head as answered on a diff nobody has read.
     //
     // A TIE is stale. GitHub stamps to the second, so a review submitted in
     // the same second as the retarget has no established order against it,
-    // and the ambiguity must not be what settles a head. The reaction and
-    // comment paths already require strictly newer (`at > bound`,
-    // `at <= bound` skips); this is the same rule.
+    // and the ambiguity must not be what settles a head. The comment and
+    // table paths already require strictly newer; this is the same rule.
     if (since !== null && t <= since) continue;
     if (at === null || t > at) at = t;
   }
@@ -402,19 +347,18 @@ export async function codexReviewedAt(api, { owner, name, number, headRefOid, si
  * for auto-merge to take. Forged or honest-but-early dates only admit a
  * previous head's comments, which settles to FINDINGS too eagerly — the
  * gate stays closed and the verdict waits for a nudge, a push, or the
- * schedule. Approval itself never trusts the commit date at all — see
- * `readReactions`.
+ * schedule. Approval itself never trusts the commit date at all: the
+ * table and a clean comment name the commit they read.
  *
  * The nudge is owner-only for the same reason holds are: this repo is
  * public, and letting any comment shaped like a nudge hold the gate would
  * hand passers-by a merge block.
  *
  * `askAt` is the wider signal: the newest `@codex review` from anyone with
- * write access, owner included. Codex answers a collaborator's ask too, and
- * a clean answer is a 👍 that emits no webhook, so the ask has to restart
- * the polling clock or that 👍 waits for the schedule. It only wakes and
- * never holds, so the worst a collaborator can do with it is one
- * UNANSWERED_MINUTES window of polling. Passers-by are still left out,
+ * write access, owner included. Codex answers a collaborator's ask too, so
+ * the ask restarts the polling clock, a backstop should the table's edit
+ * be missed. It only wakes and never holds, so the worst a collaborator
+ * can do with it is one UNANSWERED_MINUTES window of polling. Passers-by are still left out,
  * because on a public repo their asks would cost the runner and buy nothing.
  */
 const WRITERS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -429,6 +373,9 @@ export function commentSignals(comments, { since, owner, head }) {
   for (const c of comments ?? []) {
     const at = utc(c.created_at) ?? "";
     if (matchesBot(c.user)) {
+      // The status table is Codex's bookkeeping, not an answer: it is read
+      // for what it states (`codexCodeReview`), never as a finding.
+      if (String(c.body ?? "").includes(SUMMARY_MARKER)) continue;
       // Codex's word stays on created_at: its edits do not re-answer, and a
       // later timestamp here could only mask a nudge — the fail-open way.
       if (at <= bound) continue;
@@ -436,9 +383,7 @@ export function commentSignals(comments, { since, owner, head }) {
       if (clean === "head") {
         // An attributable clean verdict: Codex says it found nothing AND
         // names the commit it read, which is the same standard a review is
-        // held to. Its footer promises a 👍 in this case and it does not
-        // always keep that promise, so the comment has to be a channel too --
-        // otherwise the gate waits forever for a reaction that never comes.
+        // held to. Codex posts it when asked with `@codex review`.
         if (cleanAt === null || at > cleanAt) cleanAt = at;
         continue;
       }
@@ -456,7 +401,7 @@ export function commentSignals(comments, { since, owner, head }) {
       const isOwner = Boolean(owner) && c.user?.login === owner;
       if (!isOwner && !WRITERS.has(c.author_association)) continue;
       // A nudge can be EDITED into an old comment, whose created_at then
-      // predates the head or the standing 👍 — dating the ask by the later
+      // predates the head or the standing verdict — dating the ask by the later
       // of creation and edit is what hears it. REST's `since` already
       // filters on updated_at, so the edited comment reaches this walk; the
       // cost is that retouching an old nudge comment re-asks, and erring
@@ -481,7 +426,7 @@ export function commentSignals(comments, { since, owner, head }) {
  * approve whatever is current, and the commit line alone appears on findings
  * comments too, which name the commit they object to. `null` is the
  * conservative answer throughout, so an upstream template change degrades to
- * today's behavior -- the gate holds and waits for a reaction -- rather than
+ * the gate holding -- the table still approves a clean pass -- rather than
  * approving something unread.
  */
 /**
@@ -503,73 +448,6 @@ export function commentSignals(comments, { since, owner, head }) {
  * other way round: every real incident so far has been this function
  * refusing a clean verdict, never approving a hidden finding.
  */
-/**
- * The marker on Codex's status-table comment.
- *
- * Since about 2026-08-26 Codex maintains one comment per pull request
- * carrying a row per review kind -- Code Review, Security Review -- each
- * naming the commit it is about and reading `Running` then `Completed`.
- * It EDITS that comment in place as each review lands, and the edit arrives
- * as an `issue_comment` event, a trigger every consumer already declares.
- * That is the whole value here: the end of a read finally has a webhook,
- * where the 👍 has none.
- */
-export const SUMMARY_MARKER = "codex-pull-request-review-summary";
-
-/**
- * What Codex's status table says about the CODE review of this head:
- * `"running"`, `"completed"`, or null for anything else.
- *
- * Null is the conservative answer everywhere, and it means "this comment
- * tells us nothing about this head" -- the caller then behaves exactly as
- * it did before the table existed. That is what keeps an upstream change to
- * an undocumented comment from breaking the gate: a shape that stops
- * matching degrades to polling rather than to a wrong answer, the same
- * discipline `cleanVerdict` uses.
- *
- * It is deliberately NOT a verdict channel, and must never become one.
- * `Completed` is silent about whether anything was FOUND, so reading it as
- * clean would infer from absence -- and the findings review and this edit
- * have landed inside the same second on real pull requests, so that race is
- * not theoretical. Cleanliness stays with the 👍 and the attributable clean
- * comment; this only says whether the answer is still being written.
- *
- * Per ROW, because the rows disagree: observed live with Code Review
- * `Running` on one commit while Security Review still read `Completed` on
- * the commit before it. The `codex-security-review:v1` JSON marker that
- * rides in the same comment is the security row's state, not this one's,
- * and its `headSha` goes stale the same way -- so neither the comment nor
- * that marker has a single head, and only the row does.
- */
-export function reviewTableStatus(body, head) {
-  const text = String(body ?? "");
-  if (!text.includes(SUMMARY_MARKER)) return null;
-  // Everything from `<details` on is Codex's boilerplate footer, dropped
-  // before the shape is read -- as in `cleanVerdict`, and for the same
-  // reason: the footer's prose is not part of what is being validated.
-  const rows = text.split(/<details/i)[0]
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.startsWith("|"));
-  for (const row of rows) {
-    // `| a | b | c |` -> ["", " a ", " b ", " c ", ""], so the ends drop.
-    const cells = row.split("|").slice(1, -1).map((c) => c.trim());
-    if (cells.length < 3) continue;
-    if (!/\bCode Review\b/.test(cells[0])) continue;
-    const named = /`([0-9a-f]{7,40})`/.exec(cells[2])?.[1];
-    if (!named) return null;
-    // The abbreviation is Codex's -- seven characters here where the API
-    // gives forty -- so compare by prefix in the direction that cannot
-    // collide, exactly as `cleanVerdict` does: the named id must be a
-    // prefix of the full head, never the reverse.
-    if (!head || !String(head).toLowerCase().startsWith(named.toLowerCase())) return null;
-    if (/\*\*Running\*\*/.test(cells[1])) return "running";
-    if (/\*\*Completed\*\*/.test(cells[1])) return "completed";
-    return null;
-  }
-  return null;
-}
-
 // The marker Codex now opens its review comments with, any version: it names
 // the comment kind and carries no prose.
 const RECEIPT_MARKER = /^<!--[ \t]*codex-review-receipt:v\d+[ \t]*-->$/;
@@ -616,31 +494,134 @@ export function cleanVerdict(body, head) {
 }
 
 /**
- * Codex's status table for this head's CODE review, fetched from the
- * top-level comment stream.
+ * The marker on Codex's status-table comment.
  *
- * Its own call, and paid only on the would-park path in `sweep` -- the same
- * shape as `checkSuiteBirths`, which is fetched only in the two cases where
- * it can change the answer. The comment walk cannot supply this: it is
- * skipped entirely while `reading`, which is precisely the state this is
- * asked about, and it bounds Codex comments by `created_at` -- while the
- * table comment is CREATED once at pull-request open and edited in place
- * ever after, so any such bound hides it from every later head.
- *
- * Author-checked like every other Codex signal. This one cannot open a
- * gate, so a forgery could only PARK the loop early -- a stall, which is
- * fail-closed -- but the repository is public and a stranger should not be
- * able to spend the maintainer's verdict latency either.
+ * Since about 2026-08-26 Codex maintains one comment per pull request
+ * carrying a row per review kind -- Code Review, Security Review -- each
+ * naming the commit it is about and reading `Running` then `Completed`.
+ * It EDITS that comment in place as each review lands, and the edit arrives
+ * as an `issue_comment` event, a trigger every consumer already declares.
+ * So the end of every review has a webhook.
  */
-export async function codeReviewTableStatus(api, { owner, name, number, head }) {
+export const SUMMARY_MARKER = "codex-pull-request-review-summary";
+
+// The machine-readable state riding in the same comment: per review kind,
+// the commit it read, `running`/`completed`, and whether it found anything.
+const STATE_MARKER = /<!--[ \t]*codex-review-state:v1[ \t]+(\{[\s\S]*?\})[ \t]*-->/;
+
+/**
+ * The `codex-review-state:v1` object in a summary comment, or null where
+ * there is none or it does not parse. Null is the conservative answer:
+ * without it nothing approves through the table.
+ */
+export function reviewState(body) {
+  const m = STATE_MARKER.exec(String(body ?? ""));
+  if (!m) return null;
+  try {
+    const state = JSON.parse(m[1]);
+    return state && typeof state === "object" ? state : null;
+  } catch {
+    // Unparseable is unread: the caller logs it and nothing approves on it.
+    return null;
+  }
+}
+
+/**
+ * The row of `kind` in Codex's status table when it names this head:
+ * `{ status, at }`, with `status` `"running"`, `"completed"`, or null for a
+ * word this file does not know, and `at` the time the row carries (when it
+ * started running, or when it completed). Null where no such row names
+ * this head -- a row about another commit says nothing about this one.
+ *
+ * Per ROW, because the rows disagree: observed live with Code Review
+ * `Running` on one commit while Security Review still read `Completed` on
+ * the commit before it.
+ */
+export function reviewTableRow(body, head, kind = "Code Review") {
+  const text = String(body ?? "");
+  if (!text.includes(SUMMARY_MARKER)) return null;
+  // Everything from `<details` on is Codex's boilerplate footer, dropped
+  // before the shape is read -- as in `cleanVerdict`, and for the same
+  // reason: the footer's prose is not part of what is being validated.
+  const rows = text.split(/<details/i)[0]
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("|"));
+  for (const row of rows) {
+    // `| a | b | c |` -> ["", " a ", " b ", " c ", ""], so the ends drop.
+    const cells = row.split("|").slice(1, -1).map((c) => c.trim());
+    if (cells.length < 3) continue;
+    if (!cells[0].includes(kind)) continue;
+    const named = /`([0-9a-f]{7,40})`/.exec(cells[2])?.[1];
+    if (!named) return null;
+    // The abbreviation is Codex's -- seven characters here where the API
+    // gives forty -- so compare by prefix in the direction that cannot
+    // collide, exactly as `cleanVerdict` does: the named id must be a
+    // prefix of the full head, never the reverse.
+    if (!head || !String(head).toLowerCase().startsWith(named.toLowerCase())) return null;
+    const at = utc(/datetime="([^"]+)"/.exec(cells[1])?.[1] ?? null);
+    if (/\*\*Running\*\*/.test(cells[1])) return { status: "running", at };
+    if (/\*\*Completed\*\*/.test(cells[1])) return { status: "completed", at };
+    return { status: null, at };
+  }
+  return null;
+}
+
+/** The status of this head's CODE review row: see `reviewTableRow`. */
+export function reviewTableStatus(body, head) {
+  return reviewTableRow(body, head)?.status ?? null;
+}
+
+/**
+ * Codex's code review of this head, as its summary comment states it:
+ * `{ status, findings, at }`, or null where the comment says nothing
+ * about this head.
+ *
+ * - `status` is `"running"` or `"completed"` (or null for a word this file
+ *   does not know, which neither parks nor approves).
+ * - `findings` is the state's `has_any_findings`: `false` is Codex saying
+ *   that review of this commit found nothing -- the clean pass that leaves
+ *   no comment and no review, only a 👍 that names no commit. Anything but
+ *   `false` is not clean.
+ * - `at` is when that row says it completed (or started), the time a clean
+ *   answer is ordered by against findings and nudges.
+ *
+ * The state names the FULL commit, so it is matched exactly: nothing here
+ * has to guess which head a verdict was about. The table row is read
+ * alongside for its time, and has to agree on the status.
+ *
+ * Author-checked like every other Codex signal: a forged table could
+ * otherwise approve.
+ */
+export async function codexCodeReview(api, { owner, name, number, head, log = () => {} }) {
+  const sha = String(head ?? "").toLowerCase();
   for (let page = 1; ; page += 1) {
     const batch = await api.rest(
       `/repos/${owner}/${name}/issues/${number}/comments?per_page=100&page=${page}`,
     );
     for (const c of batch ?? []) {
-      if (!matchesBot(c.user)) continue;
-      const status = reviewTableStatus(c.body, head);
-      if (status) return status;
+      if (!matchesBot(c.user) || !String(c.body ?? "").includes(SUMMARY_MARKER)) continue;
+      const row = reviewTableRow(c.body, head);
+      const state = reviewState(c.body);
+      if (state === null && /codex-review-state:/.test(c.body)) {
+        log(`#${number}: Codex's review state did not parse — reading it as nothing said`);
+      }
+      const code = state?.code_review;
+      if (code && typeof code.commit_sha === "string" && code.commit_sha.toLowerCase() === sha) {
+        const status = code.status === "running" || code.status === "completed" ? code.status : null;
+        // Only where the row agrees with the state: a state left at
+        // "running" beside a finished row would otherwise park the sweep
+        // on a review that is not running.
+        const agreed = status !== null && row?.status === status;
+        return {
+          status: agreed ? status : null,
+          findings: code.has_any_findings,
+          at: agreed ? row.at : null,
+        };
+      }
+      // A table with no state: still says whether a review of this head is
+      // running, never that it was clean.
+      if (row && !state) return { status: row.status, findings: null, at: row.at };
     }
     if (!batch || batch.length < 100) return null;
   }
@@ -730,7 +711,7 @@ export function verdictFor({
 }) {
   if (isDraft) return null;
 
-  // A status belongs to the commit; the reaction belongs to the PR. Two open
+  // A status belongs to the commit; the review belongs to the PR. Two open
   // PRs on one head cannot both be described by one status, so approve
   // neither — blocking asks a human to look, where the alternative is a merge
   // justified by another PR's review.
@@ -753,11 +734,8 @@ export function verdictFor({
   if (security) return { state: "pending", description: SECURITY };
 
   // Codex still reading is the answer being written, not a hold: `pending`,
-  // even over a 👍 (a re-read in progress revokes the old verdict's meaning
-  // before it revokes the reaction). Pending is also what keeps the minute
-  // loop running through the review, which is the loop's whole point — a
-  // `failure` here would idle the loop precisely while the next minute could
-  // change the answer.
+  // even over an earlier clean answer, since whoever asked for the re-read
+  // wants the new one.
   // A generated-only push carries the previous head's verdict: the lanes
   // engine vouched that this head is the one before it plus files CI
   // itself wrote back (see `carriedVerdict`), and Codex's answer on that
@@ -774,10 +752,10 @@ export function verdictFor({
   if (reading) return { state: "pending", description: PENDING };
 
   // The owner asked for another look, and the ask is newer than Codex's
-  // last word — including a standing 👍. Honoring the old approval while a
-  // re-review is pending is a merge nobody wants anymore, so the gate
-  // closes until the fresh answer lands; a new 👍 postdating the nudge
-  // reopens it through `approved` on a later sweep.
+  // last word — including a standing clean one. Honoring the old approval
+  // while a re-review is pending is a merge nobody wants anymore, so the
+  // gate closes until the fresh answer lands; a clean one postdating the
+  // nudge reopens it through `approved` on a later sweep.
   if (nudged) return { state: "pending", description: PENDING };
 
   if (approved) {
@@ -785,11 +763,11 @@ export function verdictFor({
   }
 
   // Approval outranks findings on purpose: after a fix-and-nudge round the
-  // old review still names this head, and the fresh 👍 is Codex saying it is
-  // satisfied. The caller only sets `approved` when the 👍 is strictly newer
-  // than Codex's last written word on the head (see `judge`), so the standing
-  // order here never lets a leftover reaction outrank findings that came
-  // after it. Reading outranks both — a re-read is the verdict changing.
+  // old review still names this head, and the fresh clean answer is Codex
+  // saying it is satisfied. The caller only sets `approved` when that answer
+  // is strictly newer than Codex's last findings on the head (see `judge`),
+  // so the standing order here never lets a leftover verdict outrank
+  // findings that came after it. Reading outranks both.
   if (findings) return { state: "pending", description: FINDINGS };
 
   // Below findings on purpose: a head Codex left findings on HAS been
@@ -1056,116 +1034,41 @@ export function createApi({ token, fetchImpl = fetch }) {
 }
 
 /**
- * What the PR-body reactions say: Codex's verdict, and any hold on it.
+ * The hold the PR-body reactions put on the gate, or null: `"👎"` or `"👀"`
+ * from the repository owner.
  *
- * `since` is when GitHub first saw a commit status on this head — the
- * earliest status of ANY context, not just ours. Codex revokes its 👍 when
- * a new commit lands, but *asynchronously* — it has to notice the push
- * first — so for a few seconds or minutes the PR carries a new head and the
- * previous head's reaction, and reading those together approves a commit
- * nobody reviewed. A reaction newer than `since` cannot be that: any status
- * is server-stamped proof the head already existed.
+ * Reactions only ever hold now. Codex's own 👍 and 👀 decide nothing: they
+ * name no commit, a 👍 can outlive the head it was about, and a 👀 stays up
+ * while ANY of Codex's reviews runs, a stuck security review included, so
+ * every attempt to time them against each other turned up another case.
+ * Codex's verdict is read from what it writes instead (`codexCodeReview`,
+ * `codexReviewedAt`, `cleanVerdict`).
  *
- * Any context, because our own first write can be LATE — a delayed first
- * sweep — and a 👍 that arrived before it would then sit below the bound
- * forever, unrevivable, with the gate stuck at pending. A third party's
- * status (a deploy, classic CI) lands seconds after the push, well before
- * Codex's earliest possible reaction, so in practice the bound predates
- * every genuine 👍; where that still dates the head too late, `judge`
- * retries with the head's check suites (see `earliestCheckSuite`), and
- * floors everything at the last force-push so a recycled commit's old
- * records cannot resurrect a previous life's approval. The bound is a server timestamp rather than the commit's
- * `committedDate` because a commit date is set by whoever makes the commit
- * (`--date`, or a prebuilt commit), and forged early it would make a stale
- * 👍 read fresh — the one failure that opens the gate. The comment walk
- * makes the opposite choice, and `commentSignals` says why the safe bound
- * differs by direction. No statuses at all means nothing dates the head,
- * and the answer to that is `pending` — this sweep writes the first status,
- * and a fresh reaction after it can approve on a later sweep.
- *
- * Holds come only from the repository owner, plus Codex's own 👀. On a public
- * repo any account can react, and a hold deliberately survives head changes,
- * so an unrestricted hold lets a passer-by block a PR indefinitely. Codex's
- * 👀 is included because it means "still reading" — it clears that when it
- * reacts 👍 — and it is not a passer-by.
+ * Owner only. On a public repo any account can react, and a hold
+ * deliberately survives head changes, so an unrestricted hold lets a
+ * passer-by block a PR indefinitely.
  *
  * Holds are deliberately NOT filtered by time: a 👎 left on an earlier head is
  * still someone saying don't merge this, and a new commit is not an answer to
  * it. That errs toward blocking, which is the safe direction here.
  */
-export function readReactions(nodes, { since, owner } = {}) {
-  let approved = false;
-  let approvedAt = null;
-  let staleApproval = false;
-  let unverifiedApproval = false;
+export function readHolds(nodes, owner) {
   let held = null;
-  let reading = false;
-  const bound = utc(since);
+  if (!owner) return held;
   for (const r of nodes ?? []) {
-    const login = r.user?.login;
-    // Login alone is the CANDIDATE test — it settles the 👀, which can only
-    // hold the gate closed, and for the 👍 it settles nothing: see the
-    // `matchesBot` call below.
-    const codex = matchesBotLogin(login);
-    const at = utc(r.createdAt) ?? "";
-    // A missing bound or reaction time both mean "cannot show this reaction
-    // is about this head", and the answer to that is `pending` rather than a
-    // merge — an unexpected result must not be what opens the gate.
-    const fresh = Boolean(bound) && at > bound;
-    // The 👍 must be Codex's: it is only a verdict because Codex revokes it
-    // on push, and nobody else's does that. Its time is kept because a
-    // clean pass leaves no review or comment — the 👍 IS Codex's last word,
-    // and a nudge is only pending while it is newer than that word.
-    if (r.content === "THUMBS_UP" && codex) {
-      // Codex's login, but is it Codex's ACCOUNT? App slugs and usernames
-      // are separate namespaces, so a human registered under the bot's name
-      // is a 👍 away from opening the gate — the one fail-open direction
-      // this file has. GraphQL cannot answer that (`matchesBotLogin`), so a
-      // 👍 arriving without type evidence approves nothing here and instead
-      // asks the caller for the REST reading of this same list, where the
-      // account type is real. Freshness is not even considered yet: the
-      // stale-👍 rescue below feeds the check-suite lookup, and paying for
-      // that on an unattributed reaction would be work done for a signal
-      // that may turn out to be a stranger's.
-      if (!matchesBot(r.user)) {
-        unverifiedApproval = true;
-      } else if (fresh) {
-        approved = true;
-        if (approvedAt === null || at > approvedAt) approvedAt = at;
-      } else {
-        // A Codex 👍 rejected only for freshness. The caller uses this to
-        // decide whether a better birth record (a check suite) could
-        // change the answer — see `judge` — so the expensive lookup is
-        // paid only when it could matter.
-        staleApproval = true;
-      }
-    }
-    const mayHold = Boolean(owner) && login === owner;
-    if (r.content === "THUMBS_DOWN" && mayHold) held = "👎";
-    if (r.content === "EYES" && mayHold && held === null) held = "👀";
-    // Codex's own 👀 is the review in flight, not a hold: it blocks approval
-    // the same way, but as `pending` rather than `failure`, because pending
-    // is what keeps the minute loop polling — Codex swaps 👀 for 👍 with no
-    // webhook, and a loop that had already gone idle would leave that 👍
-    // waiting on the throttled schedule.
-    if (r.content === "EYES" && codex) reading = true;
+    if (r.user?.login !== owner) continue;
+    if (r.content === "THUMBS_DOWN") held = "👎";
+    if (r.content === "EYES" && held === null) held = "👀";
   }
-  return { approved, approvedAt, staleApproval, unverifiedApproval, held, reading };
+  return held;
 }
 
 /**
  * Every page of PR-body reactions, from the GraphQL connection the PR list
  * already carried.
  *
- * No short-circuit on finding the thumbs-up: a hold can be on a later page,
- * and stopping early would approve over it. Missing the thumbs-up entirely
- * leaves the status `pending` — safe, but it never clears on its own, and
- * every later sweep refetches the same truncated page.
- *
- * The nodes rather than a verdict, because one sweep reads the same list
- * against as many as three bounds — a check-suite birth record can move the
- * bound in either direction — and each of those readings used to re-walk
- * the pagination for a list that cannot change inside one sweep.
+ * Every page, because a hold can be on a later one, and stopping early
+ * would approve over it.
  */
 export async function reactionNodes(api, base, { owner, name, number }) {
   const all = [...(base?.nodes ?? [])];
@@ -1180,54 +1083,6 @@ export async function reactionNodes(api, base, { owner, name, number }) {
   return all;
 }
 
-/**
- * REST's names for the three reaction contents this file reads. Anything
- * else passes through unmapped: it matches no rule in `readReactions`
- * either way, and inventing a name for it would only hide a future content
- * GitHub adds.
- */
-const REST_REACTION_CONTENT = { "+1": "THUMBS_UP", "-1": "THUMBS_DOWN", eyes: "EYES" };
-
-/**
- * The same PR-body reactions, read from REST — the channel that can say WHO
- * reacted.
- *
- * This is the one thing REST has that GraphQL does not: `Reaction.user` in
- * GraphQL is the concrete `User` type, so its `__typename` is a schema
- * constant and a bot is indistinguishable from a human of the same name
- * (see `matchesBotLogin`). REST returns the reactor as a simple-user, which
- * spells a bot's login with the `[bot]` suffix — illegal in a username, so
- * self-certifying — and carries `user.type` saying `Bot` besides. Either is
- * enough for `matchesBot`; both being absent fails closed, which is a
- * pending gate rather than a merge.
- *
- * PR-body reactions live on the ISSUE endpoint — a pull request is an issue
- * for everything that is not the diff — and the same reactions the GraphQL
- * connection returns come back here.
- *
- * Called only when a 👍 under Codex's login is actually in play, so the
- * ordinary sweep (no verdict yet, or a verdict already answered by findings)
- * pays nothing for it: one extra call while a clean pass stands, per head,
- * per sweep, and none otherwise. Shaped like the GraphQL nodes so
- * `readReactions` stays one reader with one set of rules.
- */
-export async function restReactions(api, { owner, name, number }) {
-  const all = [];
-  for (let page = 1; ; page += 1) {
-    const batch = await api.rest(
-      `/repos/${owner}/${name}/issues/${number}/reactions?per_page=100&page=${page}`,
-    );
-    for (const r of batch ?? []) {
-      all.push({
-        content: REST_REACTION_CONTENT[r.content] ?? r.content,
-        createdAt: r.created_at,
-        user: r.user,
-      });
-    }
-    if (!batch || batch.length < 100) return all;
-  }
-}
-
 /** Head SHAs carried by more than one open PR. */
 export function sharedHeads(prs) {
   const seen = new Map();
@@ -1240,18 +1095,14 @@ export function sharedHeads(prs) {
  * created time of the earliest status of ANY context.
  *
  * The newest `codex` entry is what this sweep compares against so it does
- * not rewrite an identical status. `firstSeen` is the reaction-freshness
- * bound — see `readReactions` for why it spans every context: any status is
- * server-stamped proof the head existed by then, and a third party's lands
- * seconds after the push, before our own first write can (a delayed first
- * sweep would otherwise date the head too late and invalidate a 👍 that
- * arrived first, permanently).
+ * not rewrite an identical status. `firstSeen` dates the head's arrival for
+ * the comment walk and the unanswered-head window, and spans every context:
+ * any status is server-stamped proof the head existed by then, and a third
+ * party's lands seconds after the push, before our own first write can.
  *
  * Paged to the end, because the endpoint returns *every* context, so a page
  * can be full of statuses that are not ours while older ones sit behind it.
- * Missing the tail is not a harmless truncation: a too-late bound rejects
- * an existing 👍 on every later sweep. The cap is a backstop against an
- * endless loop, not an expected limit.
+ * The cap is a backstop against an endless loop, not an expected limit.
  */
 export async function codexStatuses(api, { owner, name, sha }) {
   const mine = [];
@@ -1544,8 +1395,7 @@ export async function carriedVerdict(api, {
   // force-pushed onto a head another pull request earned the carry on. A
   // suite born on THIS branch for the named head is the server's record
   // that it was this branch's head, and it has to predate the approval.
-  // A fork head has no branch-born suite, and fails closed here exactly
-  // as its 👍 does in `judge`. Floored at the branch's last force-push
+  // A fork head has no branch-born suite, and fails closed here. Floored at the branch's last force-push
   // for the reason `judge` floors every birth there: a suite from an
   // earlier tenure of the branch -- the named head pushed, moved away
   // from, approved as another pull request's head, then force-pushed
@@ -1604,23 +1454,14 @@ export async function carriedVerdict(api, {
  * earliest suite from any branch, `forBranch` the earliest born on the
  * given branch. Either is null when no such suite exists.
  *
- * The other server-stamped birth records, and they cut both ways. Suites
- * are created when the commit is pushed, by Actions or any checks app, so
- * `any` dates a head on repos whose CI never writes a commit status — and
- * it can predate a status that merely landed late, rescuing a genuine 👍
- * (gating that rescue on "were all the statuses ours" was tried and is
- * wrong — a slow deploy status arriving AFTER the 👍 suppressed the lookup
- * while still dating the head too late, sticking the gate at pending
- * forever). `forBranch` dates the moment the commit reached THIS branch:
- * a fast-forward onto a pre-existing commit leaves no timeline event, so
- * the suite its arrival triggers is the only server-stamped record of the
- * transition — the floor that keeps the previous head's lingering 👍 from
- * approving a commit nobody reviewed. Fetched only when a 👍 is in play
- * (see `judge`), so an ordinary sweep never pays the call. `head_branch`
- * is a bare branch name — GitHub reports null for fork heads, so a fork
- * head never yields a `forBranch` and `judge` fails it closed: its 👍
- * cannot open the gate, and fork contributions merge by admin override or
- * a same-repo re-push.
+ * Server-stamped birth records. Suites are created when the commit is
+ * pushed, by Actions or any checks app. `forBranch` dates the moment the
+ * commit reached THIS branch: a fast-forward onto a pre-existing commit
+ * leaves no timeline event, so the suite its arrival triggers is the only
+ * server-stamped record of the transition. Read by the carry, to establish
+ * tenure, and by the would-park path, to give a just-arrived head its full
+ * window. `head_branch` is a bare branch name — GitHub reports null for
+ * fork heads, so a fork head never yields a `forBranch`.
  */
 export async function checkSuiteBirths(api, { owner, name, sha, branch, since }) {
   let any = null;
@@ -1634,10 +1475,9 @@ export async function checkSuiteBirths(api, { owner, name, sha, branch, since })
       if (!t) continue;
       // Suites from before the last force-push belong to a previous life of
       // the branch. The subtle revisit: rewind to an ancestor (a force-push,
-      // leaving the event), earn a 👍 there, then fast-forward BACK to the
-      // original SHA — the return leaves no event and the SHA already has a
-      // branch-born suite from its first tenure, which would date the
-      // arrival too early and let the rewound head's 👍 approve it. Any
+      // leaving the event), then fast-forward BACK to the original SHA — the
+      // return leaves no event and the SHA already has a branch-born suite
+      // from its first tenure, which would date the arrival too early. Any
       // same-branch revisit necessarily implies a force-push somewhere
       // between the tenures, so suites after the last one are exactly the
       // current life's; the re-arrival's own workflow runs mint fresh
@@ -1777,31 +1617,15 @@ export async function sweep({
   // Judge one head; returns 1 if it is still awaiting Codex's answer.
   async function judge(node) {
     const sharedHead = shared.has(node.headRefOid);
-    // Read the head's status history first: its earliest entry, whatever
-    // the context, is what a reaction has to be newer than — so this has to
-    // happen before the reactions are judged rather than at write time.
+    // The head's status history: the newest `codex` entry is what a write
+    // is compared against, and the earliest entry of any context dates the
+    // head's arrival for the comment walk and the unanswered-head window.
     const { mine, firstSeen, carrier } = await codexStatuses(api, { owner, name, sha: node.headRefOid });
     // When this SHA became this PR's head. A push can move the PR onto a
-    // commit that already existed — whose statuses and check suites date
-    // from its FIRST life, before the previous head's 👍. A force-push
-    // leaves a server-stamped timeline event, so every birth bound below is
-    // floored at the last one; but a FAST-FORWARD to a pre-existing commit
-    // (a stacked branch graduating, say) leaves no timeline event at all,
-    // and for that transition the floor comes from the head's check suites
-    // instead: the suite born on THIS PR's own branch is created when the
-    // commit reaches the branch, so it dates the transition where the
-    // timeline cannot. The force-push floor can never hide a genuine
-    // signal — a 👍 about this head postdates its arrival by construction.
-    // The suite floor is an UPPER bound of the arrival, and that is a
-    // deliberate trade: if suite creation is delayed past a genuine 👍
-    // (Actions minutes behind on the very push Codex answered in minutes —
-    // incident territory, since both fan out from the same event), the 👍
-    // reads stale and the gate holds at pending until a nudge or push
-    // refreshes the verdict. Visible and recoverable, where the
-    // alternative — trusting a 👍 older than every record of the arrival —
-    // is the silent merge of a commit nobody reviewed. No record GitHub
-    // keeps is guaranteed to precede a fast-forward arrival, so there is
-    // no sound earlier floor to prefer.
+    // commit that already existed, whose statuses date from its FIRST life.
+    // A force-push leaves a server-stamped timeline event, so the comment
+    // walk and the window are floored at the last one: a finding Codex left
+    // on that commit in a previous life is not an answer about this one.
     const movedAt = newestIn(node.forcePushes);
     // A RETARGET is the other way this PR becomes a different thing to
     // review, and it is deliberately NOT `movedAt`. Pointing a PR at a new
@@ -1814,108 +1638,15 @@ export async function sweep({
     //
     // Kept separate from `movedAt` because the suite machinery below reads
     // that as "when the head ARRIVED", and a retarget pushes nothing: no
-    // new check suite is ever born for one. Feeding it in as a head
-    // arrival would make every retargeted head undatable forever — a gate
-    // that can never clear, which is worse than the hole it closes.
+    // new check suite is ever born for one.
     const retargetedAt = newestIn(node.retargets);
-    let bound = laterOf(firstSeen, movedAt, retargetedAt);
-    // Don't read reactions when the shared head has already decided.
-    const NO_REACTIONS = {
-      approved: false, approvedAt: null, staleApproval: false,
-      unverifiedApproval: false, held: null, reading: false,
-    };
-    // Fetched once and re-read locally against every bound below, so the
-    // rebounds cost no calls at all.
-    let reactions = sharedHead
-      ? []
-      : await reactionNodes(api, node.reactions, { owner, name, number: node.number });
-    const readAt = (since) => readReactions(reactions, { since, owner });
-    let seen = sharedHead ? NO_REACTIONS : readAt(bound);
-    // A 👍 spelled with Codex's login but with nothing to say the account
-    // behind it is Codex. GraphQL cannot answer that for any reactor, so
-    // the whole list is re-read from REST, where a bot's login carries the
-    // `[bot]` suffix a username may not — and `user.type` besides. One call,
-    // paid only while a clean pass is actually standing on this head.
-    if (seen.unverifiedApproval) {
-      reactions = await restReactions(api, { owner, name, number: node.number });
-      seen = readAt(bound);
-      // Still unattributable after the channel that CAN attribute it: either
-      // someone really did register Codex's name and react with it, or
-      // GitHub changed what a reaction's user looks like. Failing closed is
-      // right in both cases, and silence is not — a gate that will never
-      // clear says so in the run log rather than being diagnosed by hand.
-      if (seen.unverifiedApproval) {
-        log(`#${node.number}: 👍 under Codex's login from an account REST does not report as a bot — not approving`);
-      }
-    }
-    // A Codex 👍 in play — fresh-looking or stale — is the case where a
-    // check-suite birth record can change the answer, in either direction:
-    // a suite born on this branch AFTER the 👍 proves the head arrived by
-    // fast-forward later than the statuses admit (the 👍 belongs to the
-    // previous head, and trusting it merges a commit nobody reviewed), and
-    // a suite born BEFORE a slow status rescues a genuine 👍 the statuses
-    // date too late. Suites are fetched only in those two cases, so an
-    // ordinary sweep never pays the call.
-    let births = null;
-    if (!sharedHead && (seen.approved || seen.staleApproval)) {
-      births = await checkSuiteBirths(api, {
-        owner, name, sha: node.headRefOid, branch: node.headRefName, since: movedAt,
-      });
-      // A same-repo head always earns a suite on its own branch within
-      // seconds — this workflow's own pull_request_target run creates one
-      // on the head SHA even where no other CI does — so a missing branch
-      // suite means the transition cannot be dated yet: the signature of a
-      // fast-forward onto a pre-stamped commit, judged in the gap before
-      // its first branch suite. Whether the commit's OLD records are suites
-      // or only statuses changes nothing, so no suites at all is the same
-      // undatable gap, not a pass. Fail closed and let the next sweep read
-      // the suite that is about to exist. Fork heads are undatable FOREVER
-      // by this test — GitHub reports no head_branch for their suites — so
-      // a fork PR's 👍 never opens this gate: their fast-forward transition
-      // has no server-stamped record at all, and an earlier exemption that
-      // fell back to the status bound was a fail-open hole wearing a
-      // compatibility excuse. A fork contribution merges by an admin
-      // override or by the owner re-pushing it to a same-repo branch,
-      // where every floor applies.
-      const undatable = births.forBranch === null;
-      if (seen.approved) {
-        if (births.forBranch !== null) {
-          const confirmed = laterOf(bound, births.forBranch);
-          if (confirmed !== bound) {
-            bound = confirmed;
-            seen = readAt(bound);
-          }
-        } else if (undatable) {
-          // The 👍's own time goes too: it may be the previous head's last
-          // word, and treating it as an answer would read this head as
-          // settled findings instead of an unanswered wait.
-          seen = { ...seen, approved: false, approvedAt: null, staleApproval: true };
-        }
-      }
-      // The rescue: a 👍 rejected purely for freshness may be genuine, with
-      // the head merely dated too late by a slow external status. An
-      // earlier birth record — the earliest suite, floored at both the
-      // force-push event and the branch-born suite so a recycled commit's
-      // old records cannot resurrect a previous life's approval — can lower
-      // the bound and revive it. An undatable head gets no rescue: lowering
-      // its bound with a foreign branch's suite is the same hole again.
-      if (!undatable && !seen.approved && seen.staleApproval) {
-        // `retargetedAt` floors the rescue too. Without it the rescue is a
-        // way back under the retarget floor: a 👍 from before a base change
-        // is exactly a 👍 "rejected purely for freshness", so the rescue
-        // would lower the bound to a suite born before the retarget and
-        // revive an approval of the old diff.
-        const better = laterOf(
-          earlierOf(firstSeen, births.any),
-          laterOf(movedAt, retargetedAt, births.forBranch),
-        );
-        if (better !== null && (bound === null || better < bound)) {
-          bound = better;
-          seen = readAt(bound);
-        }
-      }
-    }
-    const { approved, approvedAt, held, reading } = seen;
+    const bound = laterOf(firstSeen, movedAt, retargetedAt);
+    // Reactions only ever HOLD now: the owner's 👀 or 👎. Codex's own 👍
+    // and 👀 decide nothing -- its verdict is read from what it writes
+    // (see `codexCodeReview`), which names the commit it is about.
+    const held = sharedHead
+      ? null
+      : readHolds(await reactionNodes(api, node.reactions, { owner, name, number: node.number }), owner);
     // A generated-only push onto an approved head inherits that approval;
     // read only once the lanes engine has published the claim, and never
     // for a shared head, which fails closed above whatever it inherits.
@@ -1925,27 +1656,24 @@ export async function sweep({
         head: node.headRefOid, carrier, createdAt: node.createdAt, retargetedAt, movedAt, cache: carryCache, log,
       })
       : null;
-    // The finding and nudge streams are fetched whenever they could change
-    // the answer. That includes an APPROVED head: an owner nudge newer than
-    // the 👍 must reopen the wait, or auto-merge honors a verdict the owner
-    // has already asked to be redone. Only a shared head, a hold, and a
-    // read in progress settle without the walk; the `since` bound keeps it
-    // to a page in practice. A carried verdict outranks the read, so a head
-    // carrying one walks through it: the nudge or finding that would hold
-    // the carry back has to be seen to hold it.
-    const undecided = !sharedHead && !held && (!reading || Boolean(carried));
-    // Seeded from the reaction so the settle-without-the-walk paths below
-    // (shared head, hold, read in progress) carry the same value they always
-    // did; the walk can only add an attributable clean comment to it.
-    let cleanlyApproved = approved;
+    // Only a shared head and a hold settle without reading Codex.
+    const undecided = !sharedHead && !held;
+    let approved = false;
     let findings = false;
     let nudged = false;
+    let reading = false;
     let nudgeAt = null;
     let askAt = null;
     let answeredAt = null;
-    let reviewedAt = null;
     if (undecided) {
-      reviewedAt = await codexReviewedAt(api, {
+      const code = await codexCodeReview(api, {
+        owner, name, number: node.number, head: node.headRefOid, log,
+      });
+      // A review of this commit still being written. Not a verdict either
+      // way, and `pending` over any earlier one: whoever asked for it wants
+      // the new answer, not the old.
+      reading = code?.status === "running";
+      const reviewedAt = await codexReviewedAt(api, {
         owner, name, number: node.number, headRefOid: node.headRefOid,
         since: retargetedAt,
       });
@@ -1959,55 +1687,36 @@ export async function sweep({
       // admits more — see `commentSignals`.
       const bornAt = utc(node.commits?.nodes?.[0]?.commit?.committedDate);
       // Floored at the retarget for the same reason as the reviews above:
-      // a comment finding from before a base change describes the old diff,
-      // and counting it settles the head so the loop stops watching.
+      // a comment finding from before a base change describes the old diff.
       const walkSince = laterOf(earlierOf(bornAt, firstSeen), movedAt, retargetedAt);
       const signals = await codexCommentSignals(api, {
         owner, name, number: node.number, since: walkSince, head: node.headRefOid,
       });
-      const codexAt = signals.codexAt;
       nudgeAt = signals.nudgeAt;
       askAt = signals.askAt;
-      // Codex's last word on this head, wherever it was said: a review, a
-      // comment, or — for a clean pass, which leaves neither — the 👍.
-      answeredAt = laterOf(reviewedAt, codexAt, approvedAt, signals.cleanAt);
-      // A nudge newer than Codex's last word reopens the wait: the answer
-      // is due again, exactly as during a read — so the head counts as
-      // awaiting and the clock runs. Deriving this from the comments on
-      // EVERY sweep is what makes it robust: the state survives however
-      // the run was started, including a nudge run replaced in the
-      // concurrency queue by a grace-less successor. A TIE reopens it too:
-      // GitHub stamps to the second, so a nudge in the same second as the
-      // standing 👍 is an unresolved ordering, and the ambiguity must not
-      // be what leaves a success open — only an answer strictly newer than
-      // the ask settles it.
+      // The table's verdict counts only if it postdates a retarget: it
+      // names the commit, and a retarget changes the diff without changing
+      // the commit.
+      const current = (t) => t !== null && (retargetedAt === null || t > retargetedAt);
+      const done = code?.status === "completed" && current(code.at);
+      const tableCleanAt = done && code.findings === false ? code.at : null;
+      const tableFindingsAt = done && code.findings !== false ? code.at : null;
+      // Every channel Codex answers on, each tied to this commit: the
+      // table names it, a review carries its id, a clean comment names it,
+      // and a findings comment is bounded by the walk above.
+      const cleanAt = laterOf(signals.cleanAt, tableCleanAt);
+      const findingsAt = laterOf(reviewedAt, signals.codexAt, tableFindingsAt);
+      answeredAt = laterOf(cleanAt, findingsAt);
+      // A nudge newer than Codex's last word reopens the wait. A TIE
+      // reopens it too: GitHub stamps to the second, so an ask in the same
+      // second as the answer is an unresolved ordering, and the ambiguity
+      // must not be what leaves a success open.
       nudged = Boolean(nudgeAt) && (answeredAt === null || nudgeAt >= answeredAt);
-      // An attributable clean comment approves this head exactly as the 👍
-      // does. It is ANDed with the same hold and nudge checks by sitting in
-      // `approved`, so a 👎, a 👀 or a newer nudge still outranks it.
-      // Only when it is Codex's LATEST word. A clean comment followed by a
-      // findings review on the same head -- an owner nudge is the ordinary
-      // way -- must not keep approving: the reaction can outrank findings
-      // because Codex re-adds it after a re-read, but a comment is a fixed
-      // point in time and has to be compared as one.
-      const answeredElsewhereAt = laterOf(reviewedAt, codexAt);
-      const cleanIsLatest = Boolean(signals.cleanAt)
-        && (answeredElsewhereAt === null || signals.cleanAt > answeredElsewhereAt);
-      // The 👍 gets the same latest-word test as the clean comment. The
-      // reaction can outrank an OLDER findings review — after a fix-and-nudge
-      // round Codex re-adds it to say it is satisfied — but only recency
-      // makes that safe: Codex provably revokes the reaction on push, not
-      // when it later posts findings on the SAME head, so a 👍 older than
-      // Codex's last written word may be a leftover those findings
-      // superseded, and honoring it would hand auto-merge a success with an
-      // unaddressed finding standing. A tie is an unresolved ordering —
-      // GitHub stamps to the second — and ambiguity must not be what opens
-      // the gate, the same rule the nudge tie already follows.
-      const approvedIsLatest = approved
-        && (answeredElsewhereAt === null
-          || (approvedAt !== null && approvedAt > answeredElsewhereAt));
-      cleanlyApproved = approvedIsLatest || cleanIsLatest;
-      findings = !cleanlyApproved && Boolean(answeredAt) && !nudged;
+      // Clean only as Codex's LATEST word on this commit: findings after a
+      // clean answer -- an owner nudge is the ordinary way -- outrank it. A
+      // tie is unresolved and does not approve.
+      approved = cleanAt !== null && (findingsAt === null || cleanAt > findingsAt);
+      findings = !approved && Boolean(answeredAt) && !nudged;
     }
     // A marker is OUR record that this head waited out a full window with
     // nothing arriving -- and the ask it waited on is the nudge, so a nudge
@@ -2030,10 +1739,12 @@ export async function sweep({
     // arrival-dating gap tracked in TODO.md. Until that exists an override
     // costs the marker one window, which is the behavior before this change
     // and the cheaper of the two wrongs.
-    const parkedAt = PARKED.has(mine[0]?.description) ? utc(mine[0].created_at) : null;
+    // Only the current wording is sticky: a legacy marker is not replayed
+    // but replaced, by an ordinary PENDING that starts a fresh window.
+    const parkedAt = mine[0]?.description === UNANSWERED ? utc(mine[0].created_at) : null;
     const parkStands = parkedAt !== null && (nudgeAt === null || parkedAt > nudgeAt);
     const facts = {
-      isDraft: false, approved: cleanlyApproved, sharedHead, held, reading,
+      isDraft: false, approved, sharedHead, held, reading,
       findings, nudged: nudged && !parkStands, carried,
       // Read back off the head rather than recomputed: see UNANSWERED for
       // why this has to be sticky. Everything that should clear it -- a
@@ -2065,49 +1776,41 @@ export async function sweep({
     const changed = await publish(writer, { owner, name, pr: node, verdict, current: mine[0], log, appLogin });
     if (changed) written.push({ number: node.number, ...verdict });
     if (verdict.state !== "pending") return 0;
-    // Eyes on means the review genuinely started. That used to keep a
-    // reading head on the clock unconditionally -- long reads being what
-    // the loop is for -- because the answer's arrival had no webhook: the
-    // 👍 emits nothing, so polling through the read was the only way to
-    // see it land.
+    // A review of this head still running parks it: Codex's status table
+    // is EDITED to `Completed` when the answer lands, an `issue_comment`
+    // event every consumer already triggers on, so the read announces its
+    // own end and needs no fast clock. Still `pending` -- nothing fails
+    // open. Measured on a private sibling's pull request, 2026-09-02: the
+    // edit's run published the verdict seven seconds after firing.
     //
-    // Codex's status table changed that premise. It says, per row and per
-    // commit, whether this head's code review is still `Running`, and it is
-    // EDITED to `Completed` when the answer arrives -- an `issue_comment`
-    // event every consumer already triggers on. So a read whose end will
-    // announce itself does not need the fast clock: park the head (still
-    // `pending` -- nothing fails open) and let that edit be the wake.
-    // Measured on a private sibling's pull request, 2026-09-02: the edit's
-    // run published the verdict seven seconds after firing, while the poll
-    // it replaced had already been cancelled in the concurrency queue.
-    //
-    // Only `running` parks. Null -- no table, an unreadable one, or a row
-    // about a different commit -- keeps the old behavior, so a shape that
-    // stops matching costs polling rather than correctness.
+    // Confirmed by a second read before parking: the run the `Completed`
+    // edit starts can read the comment a moment before the edit shows, and
+    // parking on that stale `Running` would let the only wake go by. Not
+    // confirmed, the head keeps the clock, which sees the edit land.
     if (reading) {
-      const table = await codeReviewTableStatus(api, {
-        owner, name, number: node.number, head: node.headRefOid,
+      const again = await codexCodeReview(api, {
+        owner, name, number: node.number, head: node.headRefOid, log,
       });
-      if (table === "running") {
+      if (again?.status === "running") {
         log(`#${node.number}: Codex is still reading this head and says so — parking until it says otherwise`);
         return 0;
       }
       return 1;
     }
-    // A head Codex left findings on waits for a push, which is an event, so
-    // it stops polling. Not when someone has asked for a re-review since:
-    // Codex may answer that with a 👍, which no webhook announces. A tie
-    // counts as unanswered, as it does for the nudge.
+    // A head Codex left findings on waits for a push or a re-review, both of
+    // which arrive as events (the push, the table edit), so it stops
+    // polling. Not while someone has asked for a re-review since: the ask
+    // restarts the window, as it does below. A tie counts as unanswered,
+    // as it does for the nudge.
     const askOpen = Boolean(askAt) && (answeredAt === null || askAt >= answeredAt);
-    if (verdict.description === FINDINGS && reviewedAt && !askOpen) return 0;
+    if (verdict.description === FINDINGS && !askOpen) return 0;
     // SECURITY deliberately keeps the clock, unlike FINDINGS. What clears it
     // is a thread being resolved, and resolving emits nothing the listener
     // hears, so polling is the only way to see it. The age path below still
     // parks it after UNANSWERED_MINUTES, keeping its wording.
     // Everything else pending is a wait for an answer that arrives within
     // minutes of the event that asked for it — the push for a fresh head,
-    // the nudge for a re-review, the push for the 👍 a comment-only finding
-    // may still be followed by. Past UNANSWERED_MINUTES with no answer,
+    // the nudge for a re-review. Past UNANSWERED_MINUTES with no answer,
     // Codex is not coming on its own: park the head (still `pending` for
     // the gate — nothing fails open) and let the next event or scheduled
     // sweep be the retry, instead of a forgotten PR keeping every loop
@@ -2143,9 +1846,8 @@ export async function sweep({
     // window fresh at the FIRST age check, above the branch-born re-anchor
     // where the clear originally lived alone.
     //
-    // Guarded on the wording, because a comment-only finding reaches this
-    // path too (the FINDINGS fast-exit needs `reviewedAt`, which a bare
-    // comment has none of) and its accurate word must not be reopened.
+    // Guarded on the wording, because a finding with an ask still open
+    // reaches this path too, and its accurate word must not be reopened.
     const stillPolling = async () => {
       if (PARKED.has(verdict.description)) {
         const fresh = { state: "pending", description: PENDING };
@@ -2157,7 +1859,7 @@ export async function sweep({
     };
     const anchoring = mine.find((s) => !PARKED.has(s.description));
     // `askAt` includes the owner's nudge, and any collaborator's ask restarts
-    // the window the same way, so the 👍 that answers it is seen.
+    // the window the same way.
     let waitedSince = laterOf(bound, askAt, utc(anchoring?.created_at));
     if (!waitedSince) return stillPolling();
     let ms = Date.parse(waitedSince);
@@ -2168,11 +1870,9 @@ export async function sweep({
     // spelled the same as the ordinary wait. Same status, same permission,
     // different words.
     const escalate = async () => {
-      // Only the ordinary wait gets renamed. A comment-only finding -- one
-      // Codex left without submitting a review -- is why: the FINDINGS
-      // fast-exit above needs `reviewedAt`, so that head reaches here still
-      // described as FINDINGS, and saying it was never answered would be
-      // false. It would also not STAY said: `findings` outranks `unanswered`
+      // Only the ordinary wait gets renamed. A finding with an ask still
+      // open is why: that head reaches here still described as FINDINGS,
+      // and saying it was never answered would be false. It would also not STAY said: `findings` outranks `unanswered`
       // in `verdictFor`, so the next sweep writes FINDINGS back, that change
       // re-anchors the age, and the head flaps between the two every
       // UNANSWERED_MINUTES forever -- walking its gate marker forward each
@@ -2187,16 +1887,15 @@ export async function sweep({
     };
     // Looks expired — but a fast-forward can land a head already carrying
     // an identical old PENDING from a previous life, and then nothing
-    // above refreshed the anchor: no reaction means the suites were never
-    // read, publish skipped the identical write, and the head would park
-    // on its first sweep, before Codex's pickup window even opens. One
-    // suites call, paid only on this would-park path, re-anchors the age
-    // on the branch-born suite — the arrival's own record.
-    if (births === null && node.headRefName) {
-      births = await checkSuiteBirths(api, {
+    // above refreshed the anchor: publish skipped the identical write, and
+    // the head would park on its first sweep, before Codex's pickup window
+    // even opens. One suites call, paid only on this would-park path,
+    // re-anchors the age on the branch-born suite — the arrival's own record.
+    const births = node.headRefName
+      ? await checkSuiteBirths(api, {
         owner, name, sha: node.headRefOid, branch: node.headRefName, since: movedAt,
-      });
-    }
+      })
+      : null;
     waitedSince = laterOf(waitedSince, births?.forBranch);
     ms = Date.parse(waitedSince);
     // The re-anchor proved the arrival fresh after all, so this is a
@@ -2329,7 +2028,7 @@ export async function sweep({
  * measured hours delivered a median gap of 14 minutes against the 5 asked
  * for. So the job itself is the clock — one run polls every minute for most
  * of an hour, and the verdict lands within about a poll interval of Codex's
- * reaction.
+ * answer.
  *
  * What starts that run is an EVENT, not the cron. A push, a comment, and
  * Codex's own in-place edit of its review summary all wake this workflow, and
@@ -2375,8 +2074,8 @@ export async function runLoop({
     // run, before parking to wait for a nudge.
     //
     // There is deliberately no settling grace here. Every wait state is
-    // derived from data the sweep itself reads — Codex's 👀, an unanswered
-    // head, a nudge newer than Codex's last word — so it holds on every
+    // derived from data the sweep itself reads — Codex's status table, an
+    // unanswered head, a nudge newer than Codex's last word — so it holds on every
     // sweep however the run was started, and the sweep is the only writer
     // of the `codex` status, so there is no unordered write to outwait. An
     // earlier version graced event-triggered runs to bridge both gaps, and
