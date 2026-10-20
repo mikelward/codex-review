@@ -5,14 +5,12 @@ verdict as a `codex` commit status, so branch protection can require it.
 
 ## Why this exists
 
-Codex posts no check run, and its clean pass is only a 👍 reaction on the pull
-request body — which emits no webhook. The verdict is therefore both invisible
-to a protection rule and undeliverable by event, so auto-merge fires on green CI
-*before* Codex has looked. A pull request merged too early is indistinguishable
-afterwards from one merged correctly.
+Codex posts no check run, so its verdict is invisible to a protection rule,
+and auto-merge fires on green CI *before* Codex has looked. A pull request
+merged too early is indistinguishable afterwards from one merged correctly.
 
-This action polls for the reaction and writes it to a commit status a ruleset
-can name.
+This action reads Codex's verdict from what it writes about each commit and
+publishes it as a commit status a ruleset can name.
 
 ## Usage
 
@@ -182,40 +180,50 @@ workflow's own. `loop-minutes` and `interval-seconds` are the two knobs, and
 
 ## How the verdict is read
 
-The reaction is the usual verdict. Codex comments when it has suggestions and
-reacts 👍 when it does not, and it revokes the reaction when a new commit
-lands — so a reaction that is present belongs to the head being looked at, and
-nothing has to compare SHAs to establish that.
+Codex's verdict is read from what it writes, and every piece names or is
+tied to the commit it is about:
 
-**A clean comment is the second approval channel**, because Codex does not
-always keep that promise: it sometimes posts `Didn't find any major issues`
-as a comment and leaves the body unreacted — and on one pull request it put
-the 👍 on the comment that nudged it, where nothing reads it. Such a comment
-approves only when it names the commit it read and that commit is this head,
-which is the same attributable standard a review is held to, and only when it
-is Codex's latest word: findings landing after it take precedence, since a
-comment is a fixed point in time where a reaction is re-added after a re-read.
-A clean comment naming some other commit decides nothing at all.
+- **Its status-table comment.** Codex keeps one comment per pull request with a
+  row per review kind, edited in place as each review starts and finishes, and
+  a machine-readable state beside it: the commit each review read, whether it
+  is `running` or `completed`, and whether it found anything. A clean pass
+  leaves nothing else — no review and no comment — so this is where it is
+  read: a completed code review of this exact commit that found nothing
+  approves. A code review of this commit still running holds the head at
+  `pending` until it finishes.
+- **Its findings.** A review carries the commit it read; a findings comment
+  counts when it is newer than the head's arrival.
+- **A clean comment** (`Didn't find any major issues`, naming the commit),
+  which Codex posts when asked with `@codex review`.
 
-So a `success` with no reaction on the body is expected, not a fault — read
-the comments before reporting the gate broken.
+The head is approved when Codex's latest word on it is clean: findings landing
+after a clean answer take precedence, and a clean answer after findings — a
+re-review once they are fixed or rebutted — settles them. A verdict about some
+other commit decides nothing.
+
+**Codex's reactions decide nothing.** Its 👍 names no commit and can outlive
+the head it was about, and its 👀 stays up while *any* of its reviews runs — a
+security review stuck on a commit the pull request has left included — so a
+gate timed by them kept finding new ways to approve too early or wait forever.
+A `success` with a 👀 on the body, or a `pending` beside a 👍, is expected.
 
 **An unresolved security finding holds approval for the whole pull
 request.** Where Codex's security review is enabled, it runs when the pull
 request opens, not on every push. Its finding therefore names a commit the
-next push leaves behind, and reading per head would let that push's 👍 approve
-over it. So before publishing `success`, the sweep reads the pull request's
+next push leaves behind, and reading per head would let that push's clean
+review approve over it. So before publishing `success`, the sweep reads the pull request's
 review threads. Any unresolved thread Codex opened as a security finding keeps
 the head at `pending`, with the description `Codex left a security finding —
 address it and resolve its thread`. Nothing waits on the security review
 itself: if it is out of quota, not enabled, or never answers, it leaves no
-thread, and the code review's verdict stands alone. Resolving a thread sends
+thread, and the code review's verdict stands alone: a negative security
+finding blocks, a security review that never finishes does not. Resolving a thread sends
 no event the listener relays, so a head held only by this stays on the minute
 clock for the usual window. After that, the next comment, push or scheduled
 sweep picks up the resolution.
 
 Approval also requires no 👀 and no 👎 from the repository owner, and no owner
-`@codex review` newer than the 👍. That makes a hold two seconds of work from a
+`@codex review` newer than Codex's last word. That makes a hold two seconds of work from a
 phone, which matters because without one, auto-merge can land a pull request
 before somebody who wanted a look gets one.
 
@@ -228,24 +236,21 @@ fights you.
 Human review threads are deliberately not modeled. GitHub's *require
 conversation resolution* setting does that natively, and better.
 
-**Reading the verdict is a protocol, not a glance.** The reaction is only the
-CLEAN channel: findings arrive as review comments, as top-level comments, or
-as reviews, and none of those move the reaction count — so "no reaction yet"
-and "unread findings waiting" are indistinguishable from the pull request
-body, and a PR whose `updated_at` moved without a reaction usually means the
-second. Anyone — agent or person — reporting this gate's state reads all of
-it, every time: the PR-body reactions, the reviews, the review comments and
-the issue comments to their last pages, and, where a ruleset requires it, the
-`codex` **commit status** itself, which is a separate API surface from check
-runs and never appears among them. A state report assembled from fewer
-sources than that is a guess, and this file is the standing instruction not
-to make one.
+**Reading the verdict is a protocol, not a glance.** Codex's answer is spread
+across its status table, its reviews, its review comments and its top-level
+comments, and its reactions say nothing about which commit they mean. Anyone —
+agent or person — reporting this gate's state reads all of it, every time: the
+status table, the reviews, the review comments and the issue comments to their
+last pages, and, where a ruleset requires it, the `codex` **commit status**
+itself, which is a separate API surface from check runs and never appears
+among them. A state report assembled from fewer sources than that is a guess,
+and this file is the standing instruction not to make one.
 
 ## Carrying the verdict across a generated push
 
 Some workflows write their own output back onto the branch — a screenshot
 job re-records its baselines and a downstream job commits the drift. That
-commit is a push, so Codex revokes its 👍 and re-reads a diff that changed
+commit is a push, so Codex re-reads a diff that changed
 by nothing it can read, and the gate waits for that re-read. The
 [lanes engine](https://github.com/mikelward/lanes)'s **generated lane**
 already settles the other half of that push: when a `synchronize` adds
@@ -321,7 +326,7 @@ consumer configuration, in the repository's rules for its default branch:
   nothing else makes the verdict blocking.
 - **Require conversation resolution.** GitHub evaluates it at merge time,
   with no polling and no staleness window, which makes it strictly more
-  reliable than anything reaction-based — and it covers human review threads,
+  reliable than anything a sweep can do — and it covers human review threads,
   which this action deliberately does not model.
 - **Allow auto-merge**, so a pull request lands the moment its verdict does.
   This repository setting only *permits* auto-merge; it merges nothing by
@@ -346,13 +351,12 @@ Three limits worth knowing before treating the status as adversarially
 robust review:
 
 - **The ground truth is Codex reading author-controlled content.** The
-  sweep is strict about *attribution* — only Codex's own reactions,
-  reviews, and clean comments count, ordered by server timestamps, and a 👍
-  is attributed through REST, where a bot's login carries the `[bot]` suffix
-  a username may not — but
+  sweep is strict about *attribution* — only Codex's own status table,
+  reviews, and clean comments count, each read through REST, where a bot's
+  login carries the `[bot]` suffix a username may not — but
   everything Codex reads (title, body, diff, file contents) is written by
   the pull request's author, instructions to the reviewer included. If
-  Codex is talked into reacting 👍 or posting a clean verdict, the result
+  Codex is talked into a clean verdict, the result
   is genuine — correctly attributed, correctly timestamped — and publishes
   `success` exactly as designed. The gate guarantees fidelity to Codex's
   answer, not that the answer resisted manipulation; human review and the
@@ -365,8 +369,7 @@ robust review:
   current consumers are personal repos; an org adoption needs this rethought
   (repo admins instead of the owner segment) before the reactions mean
   anything. A collaborator's `@codex review` does restart the polling
-  clock, so the 👍 that answers it is seen promptly, but it never holds the
-  gate.
+  clock, but it never holds the gate.
 - **A shared head fails closed, and an outsider can share yours.** The
   status belongs to the commit, so two open pull requests carrying the same
   head are ambiguous and publish `failure` — including when the other PR is

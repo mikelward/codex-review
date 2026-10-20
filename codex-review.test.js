@@ -10,8 +10,10 @@ import {
   unresolvedSecurityFindings,
   matchesBot,
   matchesBotLogin,
-  readReactions,
-  restReactions,
+  readHolds,
+  reviewState,
+  reviewTableRow,
+  codexCodeReview,
   findingsOn,
   commentSignals,
   sweep,
@@ -25,7 +27,6 @@ import {
   input,
   cleanVerdict,
   UNANSWERED,
-  UNANSWERED_FORK,
   reviewTableStatus,
   signAppJwt,
   appToken,
@@ -103,11 +104,11 @@ describe("verdictFor", () => {
     });
   });
 
-  it("reopens the wait when the owner nudges over a standing 👍", () => {
+  it("reopens the wait when the owner nudges over a standing verdict", () => {
     // Asking Codex to look again means the standing verdict is no longer
     // the one wanted — honoring it would let auto-merge take a PR the owner
-    // just asked to have re-reviewed. Codex's fresh answer (a 👍 newer than
-    // the nudge) restores success through `approved` on a later sweep.
+    // just asked to have re-reviewed. Codex's fresh answer (a clean review
+    // newer than the nudge) restores success through `approved` later.
     expect(verdictFor({ approved: true, nudged: true })).toEqual({
       state: "pending",
       description: PENDING,
@@ -199,139 +200,40 @@ describe("carriedClaim", () => {
   });
 });
 
-describe("readReactions", () => {
-  const HEAD = "2026-08-14T12:00:00Z";
+describe("readHolds", () => {
   const CODEX = `${CODEX_BOT}[bot]`;
-  // Reactions default to after the head, so each test states only the thing
-  // it is about; the staleness cases pass their own timestamp.
   const react = (login, content, createdAt = "2026-08-14T12:05:00Z") =>
     ({ content, createdAt, user: { login } });
   const OWNER = "repo-owner";
-  const read = (nodes) => readReactions(nodes, { since: HEAD, owner: OWNER });
-
-  it("ignores a 👍 older than the commit it would approve", () => {
-    // Codex revokes on push, but asynchronously — so between a push and its
-    // noticing, the PR carries a new head and the previous head's reaction.
-    // Reading those together approves a commit nobody reviewed.
-    const stale = readReactions([react(CODEX, "THUMBS_UP", "2026-08-14T18:00:00Z")], { since: "2026-08-14T19:00:00Z" });
-    expect(stale.approved).toBe(false);
-  });
-
-  it("takes a 👍 newer than the commit", () => {
-    const fresh = readReactions([react(CODEX, "THUMBS_UP", "2026-08-14T19:30:00Z")], { since: "2026-08-14T19:00:00Z" });
-    expect(fresh.approved).toBe(true);
-  });
+  const read = (nodes) => readHolds(nodes, OWNER);
 
   it("holds on the owner's 👎 from before the head — a new commit is not an answer", () => {
-    expect(
-      readReactions([react(OWNER, "THUMBS_DOWN", "2026-08-14T18:00:00Z")], {
-        since: "2026-08-14T19:00:00Z", owner: OWNER,
-      }).held,
-    ).toBe("👎");
+    expect(read([react(OWNER, "THUMBS_DOWN", "2026-08-01T00:00:00Z")])).toBe("👎");
+  });
+
+  it("holds on the owner's 👀", () => {
+    expect(read([react(OWNER, "EYES")])).toBe("👀");
+  });
+
+  it("prefers 👎 over 👀 when both are present", () => {
+    expect(read([react(OWNER, "EYES"), react(OWNER, "THUMBS_DOWN")])).toBe("👎");
   });
 
   it("ignores a hold from anyone but the owner", () => {
     // Public repo: an unrestricted hold outlives every head, so a passer-by
     // could block a PR for as long as they left the reaction there.
-    expect(read([react("passer-by", "THUMBS_DOWN")]).held).toBeNull();
-    expect(read([react("passer-by", "EYES")]).held).toBeNull();
+    expect(read([react("passer-by", "THUMBS_DOWN")])).toBeNull();
+    expect(read([react("passer-by", "EYES")])).toBeNull();
   });
 
-  it("takes Codex's 👍 as the verdict", () => {
-    expect(read([react(CODEX, "THUMBS_UP")])).toEqual({
-      approved: true,
-      approvedAt: "2026-08-14T12:05:00Z",
-      staleApproval: false,
-      unverifiedApproval: false,
-      held: null,
-      reading: false,
-    });
+  it("reads nothing from Codex's own reactions", () => {
+    // Its 👍 and 👀 name no commit, so they neither approve nor hold.
+    expect(read([react(CODEX, "THUMBS_UP"), react(CODEX, "EYES")])).toBeNull();
   });
 
-  it("does not approve a 👍 that arrives with no evidence of the account", () => {
-    // What GraphQL returns for every reactor: a bare login on a field typed
-    // `User`. A human may register that username — app slugs and usernames
-    // are separate namespaces — so approving here is the one fail-open move
-    // this file could make. It defers instead, and the caller re-reads the
-    // list from REST.
-    const seen = read([{ content: "THUMBS_UP", createdAt: "2026-08-14T12:05:00Z", user: { login: CODEX_BOT } }]);
-    expect(seen.approved).toBe(false);
-    expect(seen.unverifiedApproval).toBe(true);
-    // Not stale either: staleApproval is what buys the check-suite lookup,
-    // and an unattributed reaction must not spend that call.
-    expect(seen.staleApproval).toBe(false);
-  });
-
-  it("approves a bare login that REST reports as a Bot", () => {
-    const seen = read([
-      { content: "THUMBS_UP", createdAt: "2026-08-14T12:05:00Z", user: { login: CODEX_BOT, type: "Bot" } },
-    ]);
-    expect(seen.approved).toBe(true);
-    expect(seen.unverifiedApproval).toBe(false);
-  });
-
-  it("refuses a 👍 from a same-named account REST reports as a human", () => {
-    // The residual this channel used to carry, now closed: the login
-    // matches, the account is a person, and the gate stays shut. It reads
-    // as unverified rather than as a stranger's reaction on purpose — the
-    // sweep says so in its log, since a squatter is worth naming and a
-    // permanently pending gate is worth explaining.
-    const seen = read([
-      { content: "THUMBS_UP", createdAt: "2026-08-14T12:05:00Z", user: { login: CODEX_BOT, type: "User" } },
-    ]);
-    expect(seen.approved).toBe(false);
-    expect(seen.unverifiedApproval).toBe(true);
-  });
-
-  it("ignores anyone else's 👍", () => {
-    // The reaction is only a verdict because Codex revokes it on push.
-    expect(read([react("someone-else", "THUMBS_UP")]).approved).toBe(false);
-  });
-
-  it("takes the owner's 👎 as a hold", () => {
-    expect(read([react(OWNER, "THUMBS_DOWN")]).held).toBe("👎");
-  });
-
-  it("reports Codex's own 👀 as reading, not as a hold", () => {
-    // Reading blocks approval like a hold does, but it maps to `pending`,
-    // not `failure` — pending is what the lean gate counts, so this is what
-    // keeps the minute loop running while the review is in flight. Codex
-    // clears its 👀 when it reacts 👍, so a 👀 still present means the
-    // answer is still being written.
-    expect(read([react(CODEX, "EYES")])).toEqual({
-      approved: false,
-      approvedAt: null,
-      staleApproval: false,
-      unverifiedApproval: false,
-      held: null,
-      reading: true,
-    });
-  });
-
-  it("keeps reading a 👍 that has picked up a 👀 since — a re-read in progress", () => {
-    expect(
-      read([react(CODEX, "THUMBS_UP"), react(CODEX, "EYES")]),
-    ).toEqual({
-      approved: true, approvedAt: "2026-08-14T12:05:00Z", staleApproval: false, unverifiedApproval: false,
-      held: null, reading: true,
-    });
-  });
-
-  it("prefers 👎 over 👀 when both are present", () => {
-    expect(
-      read([react(OWNER, "EYES"), react(OWNER, "THUMBS_DOWN")]).held,
-    ).toBe("👎");
-  });
-
-  it("ignores a reaction it has no rule for", () => {
-    expect(read([react(OWNER, "HOORAY")])).toEqual({
-      approved: false,
-      approvedAt: null,
-      staleApproval: false,
-      unverifiedApproval: false,
-      held: null,
-      reading: false,
-    });
+  it("ignores a reaction it has no rule for, and holds nothing with no owner", () => {
+    expect(read([react(OWNER, "HOORAY")])).toBeNull();
+    expect(readHolds([react(OWNER, "THUMBS_DOWN")], null)).toBeNull();
   });
 });
 
@@ -469,19 +371,6 @@ describe("utc", () => {
     expect(utc("not a time")).toBeNull();
   });
 
-  it("keeps a fresh 👍 fresh when its timestamp carries an offset", () => {
-    // The comparison that goes wrong without normalization: 05:05-07:00 IS
-    // 12:05Z — after the head — but as a raw string it sorts before
-    // "...T12:00:00Z" and would read as stale, sticking the gate at
-    // pending. Today GitHub sends UTC everywhere this file reads; this
-    // pins the behavior if a future field swap brings offsets in.
-    const seen = readReactions(
-      [{ content: "THUMBS_UP", createdAt: "2026-08-14T05:05:00-07:00", user: { login: `${CODEX_BOT}[bot]` } }],
-      { since: "2026-08-14T12:00:00Z" },
-    );
-    expect(seen.approved).toBe(true);
-    expect(seen.approvedAt).toBe("2026-08-14T12:05:00.000Z");
-  });
 });
 
 describe("matchesBot", () => {
@@ -533,52 +422,6 @@ describe("matchesBotLogin", () => {
   });
 });
 
-describe("restReactions", () => {
-  const api = (pages) => ({
-    calls: [],
-    async rest(path) {
-      this.calls.push(path);
-      const n = Number(new URLSearchParams(path.split("?")[1]).get("page"));
-      return pages[n - 1] ?? [];
-    },
-  });
-
-  it("shapes REST reactions like the GraphQL nodes one reader reads", async () => {
-    const client = api([[
-      { content: "+1", created_at: "2026-08-14T12:05:00Z", user: { login: `${CODEX_BOT}[bot]`, type: "Bot" } },
-      { content: "-1", created_at: "2026-08-14T12:06:00Z", user: { login: "o", type: "User" } },
-      { content: "eyes", created_at: "2026-08-14T12:07:00Z", user: { login: "o", type: "User" } },
-    ]]);
-    expect(await restReactions(client, { owner: "o", name: "r", number: 1 })).toEqual([
-      { content: "THUMBS_UP", createdAt: "2026-08-14T12:05:00Z", user: { login: `${CODEX_BOT}[bot]`, type: "Bot" } },
-      { content: "THUMBS_DOWN", createdAt: "2026-08-14T12:06:00Z", user: { login: "o", type: "User" } },
-      { content: "EYES", createdAt: "2026-08-14T12:07:00Z", user: { login: "o", type: "User" } },
-    ]);
-    expect(client.calls[0]).toBe("/repos/o/r/issues/1/reactions?per_page=100&page=1");
-  });
-
-  it("reads the PR-body reactions, which live on the issue endpoint", async () => {
-    const client = api([[]]);
-    await restReactions(client, { owner: "o", name: "r", number: 7 });
-    expect(client.calls).toEqual(["/repos/o/r/issues/7/reactions?per_page=100&page=1"]);
-  });
-
-  it("pages to the end — a 👍 on a later page is still the verdict", async () => {
-    const filler = Array.from({ length: 100 }, () => (
-      { content: "heart", created_at: "2026-08-14T12:00:00Z", user: { login: "passer-by", type: "User" } }
-    ));
-    const client = api([filler, [
-      { content: "+1", created_at: "2026-08-14T12:05:00Z", user: { login: `${CODEX_BOT}[bot]`, type: "Bot" } },
-    ]]);
-    const all = await restReactions(client, { owner: "o", name: "r", number: 1 });
-    expect(all.length).toBe(101);
-    expect(all.at(-1).content).toBe("THUMBS_UP");
-    // A content with no rule keeps REST's own name rather than being
-    // invented into a GraphQL one that does not exist here.
-    expect(all[0].content).toBe("heart");
-  });
-});
-
 describe("sharedHeads", () => {
   it("names only the SHAs carried by more than one PR", () => {
     expect([...sharedHeads([{ headRefOid: "a" }, { headRefOid: "a" }, { headRefOid: "b" }])]).toEqual(["a"]);
@@ -618,10 +461,48 @@ const summaryTable = ({ status, commit, security = "Completed", securityCommit =
   "",
   "<details> <summary>About Codex in GitHub</summary> boilerplate </details>",
 ].join("\n");
+// Codex's summary comment as it reads once a code review of `commit` has
+// run: the machine-readable state names the full commit and whether the
+// review found anything, and the table row carries its time. The default is
+// the clean pass Codex leaves no other comment for.
+const codexTable = ({
+  commit = "abc1234", status = "completed", findings = false, at = AFTER,
+  security = "completed", securityCommit = "0beef12",
+} = {}) => {
+  const word = { completed: "Completed", running: "Running" }[status] ?? status;
+  const sword = { completed: "Completed", running: "Running" }[security] ?? security;
+  const state = {
+    code_review: { commit_sha: commit, has_any_findings: status === "completed" ? findings : null, status },
+    security_review: { commit_sha: securityCommit, has_any_findings: null, status: security },
+  };
+  return [
+    "<!-- codex-pull-request-review-summary -->",
+    `<!-- codex-review-state:v1 ${JSON.stringify(state)} -->`,
+    "## Codex Review Summary",
+    "",
+    "| Review | Status | Commit | Review trigger |",
+    "| --- | --- | --- | --- |",
+    `| 📝 **Code Review** | ✅ **${word}** <relative-time datetime="${at}">${at}</relative-time> | \`${commit.slice(0, 7)}\` | New commits |`,
+    `| 🔒 **Security Review** | **${sword}** <relative-time datetime="${BEFORE}">t</relative-time> | \`${securityCommit.slice(0, 7)}\` | PR opened |`,
+    "",
+    "<details> <summary>About Codex in GitHub</summary> boilerplate </details>",
+  ].join("\n");
+};
+// The same, as the comment REST returns: created at PR open, edited since.
+const codexSummary = (over = {}, { created_at = BEFORE, updated_at = over.at ?? AFTER } = {}) => ({
+  user: { login: `${CODEX_BOT}[bot]`, type: "Bot" },
+  created_at,
+  updated_at,
+  body: codexTable(over),
+});
+
 // When the head commit was made — the comment walk's lower bound, always
 // earlier than the marker but later than anything about a previous head.
 const BORN_AT = "2026-08-14T11:30:00Z";
 const OWNER = "o";
+// The park wording an earlier version wrote on fork heads; commits still
+// wear it, so it is still recognized and re-worded.
+const LEGACY_FORK_MARKER = "A fork head\u0027s 👍 cannot be accepted — comment @codex review, or merge by admin override";
 
 // The marker: the earliest `codex` status on the head, saying when it was
 // first gated. A reaction has to be newer than this to count as approval.
@@ -657,20 +538,6 @@ const thumbs = (login = `${CODEX_BOT}[bot]`, createdAt = AFTER) => ({
   content: "THUMBS_UP",
   createdAt,
   user: { login },
-});
-// What GraphQL actually returns for a bot's reaction: the login with no
-// `[bot]` suffix, on a field typed `User`, so nothing on it says Bot.
-const bareThumbs = (createdAt = AFTER) => ({
-  content: "THUMBS_UP",
-  createdAt,
-  user: { login: CODEX_BOT },
-});
-// The same reaction read back from REST, where a bot's login carries the
-// suffix a username may not, and `user.type` says so besides.
-const restThumbs = (user = { login: `${CODEX_BOT}[bot]`, type: "Bot" }, created_at = AFTER) => ({
-  content: "+1",
-  created_at,
-  user,
 });
 const hold = (content = "THUMBS_DOWN", login = OWNER) => ({
   content,
@@ -774,7 +641,9 @@ function fakeFetch({
       const kind = path.includes("/issues/") ? "/issues/" : "/pulls/";
       const number = path.split(kind)[1].split("/")[0];
       const page = Number(new URLSearchParams(path.split("?")[1] ?? "").get("page") ?? 1);
-      const all = (kind === "/issues/" ? issueComments : reviewThreadComments)[number] ?? [];
+      // A function is called per read, for a comment that changes between them.
+      const source = (kind === "/issues/" ? issueComments : reviewThreadComments)[number];
+      const all = (typeof source === "function" ? source() : source) ?? [];
       return { ok: true, status: 200, json: async () => all.slice((page - 1) * 100, page * 100) };
     }
     if (path.includes("/reviews")) {
@@ -827,7 +696,8 @@ describe("sweep", () => {
     const fake = fakeFetch({
       statuses: { abc1234: [gate()] },
       checkSuites: { abc1234: [bornSuite()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     expect((await run(fake))[0].state).toBe("success");
   });
@@ -844,7 +714,8 @@ describe("sweep", () => {
     const fake = fakeFetch({
       statuses: { abc1234: [gate()] },
       checkSuites: { abc1234: [bornSuite()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     const { written } = await sweep({
       owner: OWNER, name: "r", token: "gh_workflow", statusToken: APP_CREDENTIAL,
@@ -861,7 +732,8 @@ describe("sweep", () => {
     const plain = fakeFetch({
       statuses: { abc1234: [gate()] },
       checkSuites: { abc1234: [bornSuite()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     await run(plain);
     expect(plain.calls.every((c) => c.auth === "Bearer t")).toBe(true);
@@ -877,7 +749,8 @@ describe("sweep", () => {
     const fake = fakeFetch({
       statuses: { abc1234: [gate()] },
       checkSuites: { abc1234: [bornSuite()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     expect((await run(fake))[0].state).toBe("success");
     const write = fake.calls.find((c) => c.method === "POST" && c.path.includes("/statuses/"));
@@ -887,7 +760,8 @@ describe("sweep", () => {
     const again = fakeFetch({
       statuses: { abc1234: [gate("2026-08-14T12:05:00Z", "success", "Codex reviewed this head, no findings (#1)")] },
       checkSuites: { abc1234: [bornSuite()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     expect(await run(again)).toEqual([]);
   });
@@ -906,7 +780,8 @@ describe("sweep", () => {
     const workflowBot = fakeFetch({
       statuses: standing({ login: "github-actions[bot]", type: "Bot" }),
       checkSuites: { abc1234: [bornSuite()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     const { written } = await sweep({
       owner: OWNER, name: "r", token: "gh_workflow", statusToken: APP_CREDENTIAL,
@@ -920,7 +795,8 @@ describe("sweep", () => {
     const appPosted = fakeFetch({
       statuses: standing({ login: "codex-verdict[bot]", type: "Bot" }),
       checkSuites: { abc1234: [bornSuite()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     const second = await sweep({
       owner: OWNER, name: "r", token: "gh_workflow", statusToken: APP_CREDENTIAL,
@@ -934,7 +810,8 @@ describe("sweep", () => {
     const otherApp = fakeFetch({
       statuses: standing({ login: "old-verdict[bot]", type: "Bot" }),
       checkSuites: { abc1234: [bornSuite()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     const rotated = await sweep({
       owner: OWNER, name: "r", token: "gh_workflow", statusToken: APP_CREDENTIAL,
@@ -946,7 +823,8 @@ describe("sweep", () => {
     const cased = fakeFetch({
       statuses: standing({ login: "Codex-Verdict[bot]", type: "Bot" }),
       checkSuites: { abc1234: [bornSuite()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     const sameApp = await sweep({
       owner: OWNER, name: "r", token: "gh_workflow", statusToken: APP_CREDENTIAL,
@@ -957,7 +835,8 @@ describe("sweep", () => {
     const plain = fakeFetch({
       statuses: standing({ login: "github-actions[bot]", type: "Bot" }),
       checkSuites: { abc1234: [bornSuite()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     expect(await run(plain)).toEqual([]);
   });
@@ -979,72 +858,12 @@ describe("sweep", () => {
     expect(write.body.description.includes("(#")).toBe(false);
   });
 
-  it("verifies a bare-login 👍 against REST before approving", async () => {
-    // GraphQL spells a bot's login bare, and its `Reaction.user` is typed
-    // `User`, so nothing there separates Codex from a human of the same
-    // name. REST spells it `…[bot]` — illegal in a username — so the same
-    // reaction, read there, is attributable.
+  it("ignores a summary table that is not Codex's", async () => {
+    // A forged table could otherwise approve: anyone can comment.
+    const forged = { ...codexSummary(), user: { login: "someone-else", type: "User" } };
     const fake = fakeFetch({
-      statuses: { abc1234: [gate()] },
-      checkSuites: { abc1234: [bornSuite()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([bareThumbs()]) })])],
-      issueReactions: { 1: [restThumbs()] },
-    });
-    expect((await run(fake))[0].state).toBe("success");
-    expect(fake.calls.some((c) => c.path.startsWith("/repos/o/r/issues/1/reactions"))).toBe(true);
-  });
-
-  it("refuses the 👍 when REST reports the reactor as a human", async () => {
-    // The squatting case the login alone could never catch: a person
-    // registered under the bot's name reacts 👍, and the gate stays shut.
-    const lines = [];
-    const fake = fakeFetch({
-      // A standing `success` from before the squatter's 👍 was refused, so
-      // the refusal has something to write: an identical status is skipped.
-      statuses: { abc1234: [gate(GATED_AT, "success")] },
-      checkSuites: { abc1234: [bornSuite()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([bareThumbs()]) })])],
-      issueReactions: { 1: [restThumbs({ login: CODEX_BOT, type: "User" })] },
-    });
-    const written = (await sweep({
-      owner: OWNER, name: "r", token: "t", fetchImpl: fake.impl,
-      log: (l) => lines.push(l), now: TEST_NOW,
-    })).written;
-    expect(written[0].state).toBe("pending");
-    // A gate that will never clear on its own says why in the run log.
-    expect(lines.some((l) => l.includes("not approving"))).toBe(true);
-  });
-
-  it("pays no REST call for a head with no 👍 in play", async () => {
-    // The verification is bought only where it decides something: a head
-    // Codex has not answered costs exactly what it did before.
-    const fake = fakeFetch({
-      statuses: { abc1234: [gate()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([hold("EYES", "passer-by")]) })])],
-    });
-    await run(fake);
-    expect(fake.calls.some((c) => c.path.includes("/reactions"))).toBe(false);
-  });
-
-  it("re-reads the verified list locally when a check suite moves the bound", async () => {
-    // The rebound paths used to re-walk the reaction pagination for a list
-    // that cannot change inside one sweep; now they cost nothing. One REST
-    // read, however many bounds the head is judged against.
-    const fake = fakeFetch({
-      // A status later than the 👍, so the 👍 reads stale and the
-      // earliest-suite rescue lowers the bound and revives it.
-      statuses: { abc1234: [gate("2026-08-14T12:10:00Z")] },
-      checkSuites: { abc1234: [bornSuite("2026-08-14T11:59:00Z")] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([bareThumbs()]) })])],
-      issueReactions: { 1: [restThumbs()] },
-    });
-    expect((await run(fake))[0].state).toBe("success");
-    expect(fake.calls.filter((c) => c.path.includes("/reactions")).length).toBe(1);
-  });
-
-  it("ignores a thumbs-up from anyone else", async () => {
-    const fake = fakeFetch({
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs("someone-else")]) })])],
+      issueComments: { 1: [forged] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     expect((await run(fake))[0].state).toBe("pending");
   });
@@ -1061,7 +880,8 @@ describe("sweep", () => {
 
   it("rewrites when the state has moved on", async () => {
     const fake = fakeFetch({
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode()])],
       statuses: { abc1234: [{ ...gate(), description: "old" }] },
       checkSuites: { abc1234: [bornSuite()] },
     });
@@ -1074,41 +894,53 @@ describe("sweep", () => {
     expect(fake.calls.filter((c) => c.path !== "/graphql")).toEqual([]);
   });
 
-  it("follows reactor pages before declaring pending", async () => {
-    // Codex's reaction past the first page would otherwise stick the status
-    // on pending forever, refetching the same truncated page each sweep.
+  it("reads nothing from Codex's 👍 — it names no commit", async () => {
+    // A 👍 can outlive the head it was about, so it approves nothing; only
+    // what Codex writes about this commit does.
     const fake = fakeFetch({
       statuses: { abc1234: [gate()] },
-      checkSuites: { abc1234: [bornSuite()] },
-      graphqlResponses: [
-        repoPRs([prNode({ reactions: page([thumbs("someone-else")], true, "cursor9") })]),
-        { repository: { pullRequest: { reactions: page([thumbs()]) } } },
-      ],
+      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+    });
+    // The head is already marked pending, so a correct sweep writes nothing.
+    expect(await run(fake)).toEqual([]);
+  });
+
+  it("approves a head the table names, gated or not", async () => {
+    // The table names the full commit, so no marker is needed to date it.
+    const fake = fakeFetch({
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     expect((await run(fake))[0].state).toBe("success");
   });
 
-  it("stays pending on a 👍 that predates the head being gated", async () => {
-    // The push-vs-revoke race, end to end: new head, previous head's 👍.
+  it("does not approve on a table about another commit", async () => {
     const fake = fakeFetch({
-      statuses: { abc1234: [gate()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs(undefined, BEFORE)]) })])],
-    });
-    // The head is already marked pending, so a correct sweep writes nothing;
-    // what would show here is the 👍 flipping it to success.
-    expect(await run(fake)).toEqual([]);
-    expect(fake.calls.some((c) => c.method === "POST" && c.path.includes("/statuses/"))).toBe(false);
-  });
-
-  it("stays pending on a head that has never been gated", async () => {
-    // No marker means nothing to date the reaction against, and an
-    // unexpected result must not be readable as approval.
-    const fake = fakeFetch({
-      graphqlResponses: [
-        repoPRs([prNode({ reactions: page([thumbs()]) })]),
-      ],
+      issueComments: { 1: [codexSummary({ commit: "0beef12" })] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     expect((await run(fake))[0].state).toBe("pending");
+  });
+
+  it("does not approve on a review the table says found something", async () => {
+    const fake = fakeFetch({
+      issueComments: { 1: [codexSummary({ findings: true })] },
+      graphqlResponses: [repoPRs([prNode()])],
+    });
+    expect((await run(fake))[0]).toEqual({ number: 1, state: "pending", description: FINDINGS });
+  });
+
+  it("parks a head whose review the table says is running, over an earlier clean one", async () => {
+    // A review of this commit still being written: whoever asked for it
+    // wants the new answer. The table's edit to Completed is the wake.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate(GATED_AT, "success", "Codex reviewed this head, no findings (#1)")] },
+      issueComments: { 1: [codexSummary({ status: "running" })] },
+      graphqlResponses: [repoPRs([prNode()])],
+    });
+    const out = await runFull(fake);
+    expect(out.written).toEqual([{ number: 1, state: "pending", description: PENDING }]);
+    expect(out.awaiting).toBe(0);
   });
 
   it("pages past a head's other statuses to find the gate marker", async () => {
@@ -1120,14 +952,16 @@ describe("sweep", () => {
     const fake = fakeFetch({
       statuses: { abc1234: [...filler, gate()] },
       checkSuites: { abc1234: [bornSuite()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     expect((await run(fake))[0].state).toBe("success");
   });
 
   it("withholds approval while someone is holding the PR", async () => {
     const fake = fakeFetch({
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs(), hold()]) })])],
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode({ reactions: page([hold()]) })])],
     });
     expect((await run(fake))[0]).toEqual({
       number: 1,
@@ -1137,11 +971,12 @@ describe("sweep", () => {
   });
 
   it("finds a hold on a later reaction page rather than approving over it", async () => {
-    // Why the page walk has no short-circuit on the thumbs-up: stopping at
-    // the verdict would merge past a hold nobody got to see.
+    // Why the page walk reads every page: a hold nobody got to see would
+    // otherwise merge past.
     const fake = fakeFetch({
+      issueComments: { 1: [codexSummary()] },
       graphqlResponses: [
-        repoPRs([prNode({ reactions: page([thumbs()], true, "cursor9") })]),
+        repoPRs([prNode({ reactions: page([hold("HOORAY")], true, "cursor9") })]),
         { repository: { pullRequest: { reactions: page([hold()]) } } },
       ],
     });
@@ -1152,23 +987,20 @@ describe("sweep", () => {
     // One PR waiting on Codex, one already approved, one draft: only the
     // first should keep the fast clock running.
     const fake = fakeFetch({
-      statuses: { abc1234: [gate()], bbb: [gate()] },
-      checkSuites: { bbb: [bornSuite()] },
+      statuses: { abc1234: [gate()], bbb1234: [gate()] },
+      issueComments: { 2: [codexSummary({ commit: "bbb1234" })] },
       graphqlResponses: [repoPRs([
         prNode(),
-        prNode({ number: 2, headRefOid: "bbb", reactions: page([thumbs()]) }),
+        prNode({ number: 2, headRefOid: "bbb1234" }),
         prNode({ number: 3, isDraft: true, headRefOid: "d1" }),
       ])],
     });
     expect((await runFull(fake)).awaiting).toBe(1);
   });
 
-  it("keeps the loop running while Codex is reading", async () => {
-    // Codex's 👀 is the review in flight. It must land as `pending` and
-    // count toward `awaiting`: the swap from 👀 to 👍 emits no webhook, so a
-    // loop that treated reading as a hold would go idle at the exact moment
-    // the next minute could change the answer, leaving the 👍 to the
-    // throttled schedule.
+  it("keeps the loop running on Codex's 👀 alone — it names no review", async () => {
+    // A 👀 with no table to say what is running is just an unanswered head:
+    // pending, on the clock, until its window runs out.
     const fake = fakeFetch({
       statuses: { abc1234: [gate()] },
       graphqlResponses: [repoPRs([
@@ -1181,12 +1013,11 @@ describe("sweep", () => {
     expect(out.written).toEqual([]);
   });
 
-  it("parks a reading head once Codex's table says it is still reading", async () => {
-    // The premise of the test above -- that the answer's arrival has no
-    // webhook -- stopped holding when Codex began maintaining a status
-    // table it EDITS to `Completed`. That edit is an `issue_comment` event,
-    // so the read no longer has to be polled through: park, and let the
-    // edit be the wake. Still `pending`, so nothing fails open.
+  it("parks a head once Codex's table says its review is running", async () => {
+    // The table is EDITED to `Completed` when the answer lands, an
+    // `issue_comment` event, so the read need not be polled through: park,
+    // and let the edit be the wake. Still `pending`, so nothing fails open.
+    // A table with no state line still says this much.
     const fake = fakeFetch({
       statuses: { abc1234: [gate()] },
       issueComments: {
@@ -1196,13 +1027,27 @@ describe("sweep", () => {
           body: summaryTable({ status: "Running", commit: "abc1234" }),
         }],
       },
-      graphqlResponses: [repoPRs([
-        prNode({ reactions: page([hold("EYES", `${CODEX_BOT}[bot]`)]) }),
-      ])],
+      graphqlResponses: [repoPRs([prNode()])],
     });
     const out = await runFull(fake);
     expect(out.awaiting).toBe(0);
     expect(out.written).toEqual([]);
+  });
+
+  it("keeps the clock when a second read no longer says the review is running", async () => {
+    // The run the `Completed` edit starts can read the comment just before
+    // the edit shows. Parking on that first read would let the only wake
+    // go by, so the park waits for a second read to agree.
+    let reads = 0;
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: () => [codexSummary(reads++ === 0 ? { status: "running" } : {})],
+      },
+      graphqlResponses: [repoPRs([prNode()])],
+    });
+    const out = await runFull(fake);
+    expect(out.awaiting).toBe(1);
   });
 
   it("keeps polling a reading head whose table is about another commit", async () => {
@@ -1245,22 +1090,18 @@ describe("sweep", () => {
     ]);
   });
 
-  it("closes the gate on a top-level comment but keeps the clock running", async () => {
+  it("closes the gate on a top-level comment and stops the clock", async () => {
     // The third finding stream: no submitted review, just a PR comment —
     // tied to the head by being newer than the head commit's own date,
-    // since comments carry no commit id. That missing commit id is also why
-    // the clock keeps running: Codex finishing the PREVIOUS head after a
-    // push posts exactly this shape, and the clean 👍 it may still give the
-    // current head emits no webhook — settling the loop here would leave
-    // that 👍 to the throttled schedule. Only a review matched to this head
-    // stops the clock.
+    // since comments carry no commit id. The clock can stop: whatever comes
+    // next (a push, or a re-review's table edit) arrives as an event.
     const fake = fakeFetch({
       statuses: { abc1234: [gate()] },
       issueComments: { 1: [{ user: { login: `${CODEX_BOT}[bot]` }, created_at: AFTER }] },
       graphqlResponses: [repoPRs([prNode()])],
     });
     const out = await runFull(fake);
-    expect(out.awaiting).toBe(1);
+    expect(out.awaiting).toBe(0);
     expect(out.written[0].description).toBe(FINDINGS);
   });
 
@@ -1377,7 +1218,7 @@ describe("sweep", () => {
       graphqlResponses: [repoPRs([prNode()])],
     });
     const out = await runFull(fake);
-    expect(out.awaiting).toBe(1);
+    expect(out.awaiting).toBe(0);
     expect(out.written[0].description).toBe(FINDINGS);
   });
 
@@ -1404,7 +1245,7 @@ describe("sweep", () => {
       graphqlResponses: [repoPRs([prNode()])],
     });
     const out = await runFull(fake);
-    expect(out.awaiting).toBe(1);
+    expect(out.awaiting).toBe(0);
     expect(out.written[0].description).toBe(FINDINGS);
   });
 
@@ -1434,16 +1275,18 @@ describe("sweep", () => {
     expect(fake.calls.some((c) => c.path.includes("/comments"))).toBe(false);
   });
 
-  it("reopens the wait when the owner nudges over a standing 👍", async () => {
-    // A re-review request on an approved head: honoring the old 👍 while
-    // the answer is due again would let auto-merge take a PR the owner just
-    // asked to have re-read. The nudge is newer than the 👍 — Codex's last
-    // word on a clean pass — so the gate closes and the head counts as
-    // awaiting until the fresh answer lands.
+  it("reopens the wait when the owner nudges over a standing clean review", async () => {
+    // A re-review request on an approved head: honoring the old verdict
+    // while the answer is due again would let auto-merge take a PR the owner
+    // just asked to have re-read. The nudge is newer than Codex's last word,
+    // so the gate closes until the fresh answer lands.
     const fake = fakeFetch({
       statuses: { abc1234: [gate()] },
-      issueComments: { 1: [{ user: { login: OWNER }, created_at: "2026-08-14T12:10:00Z", body: "@codex review" }] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [
+        codexSummary(),
+        { user: { login: OWNER }, created_at: "2026-08-14T12:10:00Z", body: "@codex review" },
+      ] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     const out = await runFull(fake);
     expect(out.awaiting).toBe(1);
@@ -1451,104 +1294,66 @@ describe("sweep", () => {
     expect(out.written).toEqual([]);
   });
 
-  it("restores success once a fresh 👍 postdates the nudge", async () => {
+  it("restores success once a fresh clean review postdates the nudge", async () => {
     const fake = fakeFetch({
       statuses: { abc1234: [gate()] },
-      checkSuites: { abc1234: [bornSuite()] },
-      issueComments: { 1: [{ user: { login: OWNER }, created_at: "2026-08-14T12:10:00Z", body: "@codex review" }] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs(undefined, "2026-08-14T12:15:00Z")]) })])],
+      issueComments: { 1: [
+        codexSummary({ at: "2026-08-14T12:15:00Z" }),
+        { user: { login: OWNER }, created_at: "2026-08-14T12:10:00Z", body: "@codex review" },
+      ] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     const out = await runFull(fake);
     expect(out.awaiting).toBe(0);
     expect(out.written[0].state).toBe("success");
   });
 
-  it("stops approving when findings land after the 👍 on the same head", async () => {
-    // The reaction channel's version of the clean-comment ordering bug: a
-    // standing 👍, then a findings review naming the SAME head. Codex
-    // provably revokes the reaction on push, not on a later findings pass,
-    // so the leftover 👍 must not outrank the newer written word — honoring
-    // it would hand auto-merge a success with an unaddressed finding.
+  it("stops approving when findings land after a clean review of the same head", async () => {
+    // A clean review, then a findings review naming the SAME head: the
+    // newer written word wins, or auto-merge would take a success with an
+    // unaddressed finding standing.
     const fake = fakeFetch({
       statuses: { abc1234: [gate()] },
       prReviews: { 1: [review("abc1234", undefined, "2026-08-14T12:09:00Z")] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     const out = await runFull(fake);
     expect(out.written[0].description).toBe(FINDINGS);
   });
 
-  it("keeps approving on a 👍 newer than the findings it answers", async () => {
-    // The fix-and-nudge round the standing order exists for: the old review
-    // still names this head, and the fresh 👍 is Codex saying it is
-    // satisfied. Recency is what separates this from the leftover above.
+  it("approves on a clean review newer than the findings it answers", async () => {
+    // The fix-and-nudge round: the old review still names this head, and
+    // the fresh clean review is Codex saying it is satisfied.
     const fake = fakeFetch({
       statuses: { abc1234: [gate()] },
-      checkSuites: { abc1234: [bornSuite()] },
       prReviews: { 1: [review()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs(undefined, "2026-08-14T12:15:00Z")]) })])],
+      issueComments: { 1: [codexSummary({ at: "2026-08-14T12:15:00Z" })] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     const out = await runFull(fake);
     expect(out.awaiting).toBe(0);
     expect(out.written[0].state).toBe("success");
   });
 
-  it("fails closed when the 👍 and the findings share a second", async () => {
+  it("fails closed when the clean review and the findings share a second", async () => {
     // GitHub stamps to the second, so a tie is an unresolved ordering —
     // the same rule the nudge tie follows: ambiguity must not be what
     // opens the gate.
     const fake = fakeFetch({
       statuses: { abc1234: [gate()] },
       prReviews: { 1: [review()] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     const out = await runFull(fake);
     expect(out.written[0].description).toBe(FINDINGS);
   });
 
-  it("honors a 👍 that arrived before the sweep's own first status", async () => {
-    // The delayed-first-sweep ordering: Codex approves before any `codex`
-    // status exists, then the first write would date the head AFTER the 👍
-    // and stale it forever. The freshness bound is the earliest status of
-    // ANY context — a third party's (deploy, CI) lands seconds after the
-    // push, before any genuine reaction can — so the 👍 stays fresh.
-    const fake = fakeFetch({
-      statuses: { abc1234: [
-        gate("2026-08-14T12:00:00Z"),
-        { context: "Vercel", state: "success", created_at: "2026-08-14T11:58:00Z" },
-      ] },
-      checkSuites: { abc1234: [{ created_at: "2026-08-14T11:58:30Z", head_branch: "claude/topic" }] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs(undefined, "2026-08-14T11:59:00Z")]) })])],
-    });
-    const out = await runFull(fake);
-    expect(out.written[0].state).toBe("success");
-    // A fresh-looking 👍 pays one suites call to confirm the head did not
-    // arrive by fast-forward onto a pre-stamped commit — the branch-born
-    // suite predates the 👍 here, so the approval holds.
-    expect(fake.calls.some((c) => c.path.includes("/check-suites"))).toBe(true);
-  });
-
-  it("fails closed when a same-repo head has no suites at all yet", async () => {
-    // A fast-forwarded head can carry old STATUSES and no suites — judged
-    // in the gap before this workflow's own run creates the branch suite.
-    // Old records being statuses rather than suites changes nothing: with
-    // no branch-born suite the transition cannot be dated, and trusting
-    // the status bound is the same fail-open hole.
-    const fake = fakeFetch({
-      statuses: { abc1234: [{ context: "Vercel", state: "success", created_at: "2026-08-10T09:00:00Z" }] },
-      graphqlResponses: [repoPRs([prNode({
-        reactions: page([thumbs(undefined, "2026-08-10T09:05:00Z")]),
-      })])],
-    });
-    const out = await runFull(fake);
-    expect(out.awaiting).toBe(1);
-    expect(out.written[0].state).toBe("pending");
-  });
-
   it("hears a nudge edited into an old comment", async () => {
     // An owner can ask for a re-review by editing "@codex review" into an
     // existing comment; its created_at then predates the head or the
-    // standing 👍 and the ask would be filtered out or read as answered.
+    // standing clean review and the ask would be filtered out or read as answered.
     // The ask is dated by the later of creation and edit — erring toward
     // blocking on an owner's ask, the file's stated direction.
     const fake = fakeFetch({
@@ -1557,38 +1362,33 @@ describe("sweep", () => {
         { context: "Vercel", state: "success", created_at: "2026-08-14T11:58:00Z" },
       ] },
       checkSuites: { abc1234: [{ created_at: "2026-08-14T11:58:30Z", head_branch: "claude/topic" }] },
-      issueComments: { 1: [{
+      issueComments: { 1: [codexSummary({ at: "2026-08-14T12:15:00Z" }), {
         user: { login: OWNER },
         created_at: "2026-08-13T09:00:00Z",
         updated_at: "2026-08-14T12:30:00Z",
         body: "@codex review",
       }] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs(undefined, "2026-08-14T12:15:00Z")]) })])],
+      graphqlResponses: [repoPRs([prNode()])],
     });
     const out = await runFull(fake);
     expect(out.awaiting).toBe(1);
     // The head already carries `pending`; the point is that the edited-in
-    // ask keeps the 👍 from flipping it to success.
+    // ask keeps the clean review from flipping it to success.
     expect(out.written).toEqual([]);
   });
 
-  it("ignores a previous life's records on a recycled head", async () => {
-    // A force-push can move the PR onto a commit that already existed —
-    // whose statuses, suites, and even a 👍 date from its first life. The
-    // birth bound is floored at the force-push event (server-stamped), so
-    // nothing from before the commit became THIS PR's head can approve it.
-    const era = "2026-08-10T09:00:00Z";
+  it("keeps a clean review of this commit across a force-push away and back", async () => {
+    // The table names the commit, and the commit is the code: returning to
+    // a commit Codex already found clean in this pull request is the same
+    // code it read, so the verdict stands.
     const fake = fakeFetch({
-      statuses: { abc1234: [{ context: "Vercel", state: "success", created_at: era }] },
-      checkSuites: { abc1234: [{ created_at: era, head_branch: "claude/topic" }] },
+      statuses: { abc1234: [gate()] },
+      issueComments: { 1: [codexSummary({ at: "2026-08-14T11:40:00Z" })] },
       graphqlResponses: [repoPRs([prNode({
         forcePushes: { nodes: [{ createdAt: "2026-08-14T12:00:00Z" }] },
-        reactions: page([thumbs(undefined, "2026-08-10T09:05:00Z")]),
       })])],
     });
-    const out = await runFull(fake);
-    expect(out.awaiting).toBe(1);
-    expect(out.written[0].state).toBe("pending");
+    expect((await runFull(fake)).written[0].state).toBe("success");
   });
 
   it("asks GitHub for the retarget event, not only the force-push", async () => {
@@ -1616,20 +1416,16 @@ describe("sweep", () => {
     expect(query).toContain("HEAD_REF_FORCE_PUSHED_EVENT");
   });
 
-  it("revokes a standing 👍 dated before the newest timeline floor", async () => {
-    // What the retarget event buys once it is in the timeline: a 👍 older
-    // than it reads stale, so a base change cannot leave `codex: success`
-    // standing over a diff nothing has read. The head already carries
-    // `pending`, so the assertion is that nothing flipped it to success --
-    // which is what the pre-fix code did with the same fixture.
+  it("revokes a clean review dated before the newest timeline floor", async () => {
+    // A retarget changes the diff without changing the commit, so a clean
+    // review of the commit from before it read a different diff, and a base
+    // change must not leave `codex: success` standing over it.
     const fake = fakeFetch({
       statuses: { abc1234: [gate("2026-08-14T11:50:00Z")] },
-      checkSuites: { abc1234: [bornSuite("2026-08-14T11:49:00Z")] },
+      issueComments: { 1: [codexSummary({ at: "2026-08-14T11:55:00Z" })] },
       graphqlResponses: [repoPRs([prNode({
         updatedAt: "2026-08-14T12:01:00Z",
-        // The retarget, AFTER the 👍 below.
         retargets: { nodes: [{ createdAt: "2026-08-14T12:00:00Z" }] },
-        reactions: page([thumbs(undefined, "2026-08-14T11:55:00Z")]),
       })])],
     });
     const out = await runFull(fake);
@@ -1679,115 +1475,44 @@ describe("sweep", () => {
     expect(out.awaiting).toBe(1);
   });
 
-  it("keeps approving when the 👍 postdates the timeline floor", async () => {
+  it("keeps approving when the clean review postdates the timeline floor", async () => {
     // The other direction, so the guard above cannot be satisfied by a rule
     // that simply refuses every pull request carrying one of these events:
     // Codex re-reading AFTER the retarget is the verdict we want honored.
     const fake = fakeFetch({
       statuses: { abc1234: [gate("2026-08-14T11:50:00Z")] },
-      checkSuites: { abc1234: [bornSuite("2026-08-14T11:49:00Z")] },
+      issueComments: { 1: [codexSummary({ at: "2026-08-14T12:03:00Z" })] },
       graphqlResponses: [repoPRs([prNode({
         updatedAt: "2026-08-14T12:04:00Z",
         retargets: { nodes: [{ createdAt: "2026-08-14T12:00:00Z" }] },
-        // Codex re-read after the retarget.
-        reactions: page([thumbs(undefined, "2026-08-14T12:03:00Z")]),
       })])],
     });
     const out = await runFull(fake);
     expect(out.written[0].state).toBe("success");
   });
 
-  it("rescues a 👍 dated too late only by a slow external status", async () => {
-    // The gap the all-statuses-ours gate left open: a deploy status landing
-    // AFTER the 👍 suppressed the suite lookup while still dating the head
-    // too late. The lookup now runs whenever a Codex 👍 was rejected purely
-    // for freshness — the one case an earlier bound could change the answer.
+  it("approves a fork head the table names", async () => {
+    // The table names the commit, so a fork head needs no arrival dating:
+    // it is judged like any other.
     const fake = fakeFetch({
-      statuses: { abc1234: [
-        gate("2026-08-14T12:00:00Z"),
-        { context: "Vercel", state: "success", created_at: "2026-08-14T12:10:00Z" },
-      ] },
-      checkSuites: { abc1234: [{ created_at: "2026-08-14T11:58:00Z", head_branch: "claude/topic" }] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs(undefined, "2026-08-14T11:59:00Z")]) })])],
+      statuses: { abc1234: [gate()] },
+      issueComments: { 1: [codexSummary()] },
+      graphqlResponses: [repoPRs([prNode({ isCrossRepository: true })])],
     });
-    const out = await runFull(fake);
-    expect(out.written[0].state).toBe("success");
+    expect((await runFull(fake)).written[0].state).toBe("success");
   });
 
-  it("rejects a lingering 👍 when the head arrived by fast-forward", async () => {
-    // A fast-forward onto a pre-existing commit — a stacked branch
-    // graduating — leaves NO force-push event, and the commit's old
-    // statuses and suites predate the previous head's 👍, which Codex has
-    // not yet revoked. The suite born on this PR's own branch is the only
-    // server-stamped record of the transition; a 👍 older than it belongs
-    // to a head nobody is looking at anymore.
-    const era = "2026-08-10T09:00:00Z";
-    const fake = fakeFetch({
-      statuses: { abc1234: [{ context: "Vercel", state: "success", created_at: era }] },
-      checkSuites: { abc1234: [
-        { created_at: era, head_branch: "stack/upper" },
-        { created_at: "2026-08-14T12:00:00Z", head_branch: "claude/topic" },
-      ] },
-      graphqlResponses: [repoPRs([prNode({
-        reactions: page([thumbs(undefined, "2026-08-10T09:05:00Z")]),
-      })])],
-    });
-    const out = await runFull(fake);
-    expect(out.awaiting).toBe(1);
-    expect(out.written[0].state).toBe("pending");
-  });
-
-  it("fails closed when a same-repo head's suites name only other branches", async () => {
-    // The gap before the fast-forwarded head's first branch suite exists:
-    // old foreign-branch suites prove the commit predates its arrival here,
-    // and nothing yet dates the arrival. Trusting the status bound in that
-    // window is exactly the fast-forward hole, so the head waits the sweep
-    // out — CI runs on every same-repo push, so the dating suite is seconds
-    // away.
-    const era = "2026-08-10T09:00:00Z";
-    const fake = fakeFetch({
-      statuses: { abc1234: [{ context: "Vercel", state: "success", created_at: era }] },
-      checkSuites: { abc1234: [{ created_at: era, head_branch: "stack/upper" }] },
-      graphqlResponses: [repoPRs([prNode({
-        reactions: page([thumbs(undefined, "2026-08-10T09:05:00Z")]),
-      })])],
-    });
-    const out = await runFull(fake);
-    expect(out.awaiting).toBe(1);
-    expect(out.written[0].state).toBe("pending");
-  });
-
-  it("fails closed for a fork head, whose suites never name a branch", async () => {
-    // GitHub reports head_branch: null for suites on cross-repository
-    // heads, so nothing ever dates a fork head's transition — and an
-    // exemption that fell back to the status bound let a fast-forwarded
-    // fork head inherit the previous head's 👍. Fork contributions merge
-    // by admin override or a same-repo re-push; this gate stays closed.
-    const fake = fakeFetch({
-      statuses: { abc1234: [
-        gate("2026-08-14T12:00:00Z"),
-        { context: "Vercel", state: "success", created_at: "2026-08-14T11:58:00Z" },
-      ] },
-      checkSuites: { abc1234: [{ created_at: "2026-08-14T11:58:30Z", head_branch: null }] },
-      graphqlResponses: [repoPRs([prNode({
-        isCrossRepository: true,
-        reactions: page([thumbs(undefined, "2026-08-14T11:59:00Z")]),
-      })])],
-    });
-    const out = await runFull(fake);
-    expect(out.awaiting).toBe(1);
-    expect(out.written).toEqual([]);
-  });
-
-  it("reopens the wait on a nudge tied with the 👍 to the second", async () => {
+  it("reopens the wait on a nudge tied with the clean review to the second", async () => {
     // GitHub stamps to the second; a nudge in the same second as the
-    // standing 👍 is an unresolved ordering, and ambiguity must not be
+    // standing verdict is an unresolved ordering, and ambiguity must not be
     // what leaves a success open for auto-merge.
     const fake = fakeFetch({
       statuses: { abc1234: [gate("2026-08-14T12:00:00Z")] },
-      checkSuites: { abc1234: [bornSuite()] },
-      issueComments: { 1: [{ user: { login: OWNER }, created_at: AFTER, body: "@codex review" }] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs(undefined, AFTER)]) })])],
+      issueComments: { 1: [
+        codexSummary(),
+        { user: { login: OWNER }, created_at: AFTER, body: "@codex review" },
+      ] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     const out = await runFull(fake);
     expect(out.awaiting).toBe(1);
@@ -1815,44 +1540,6 @@ describe("sweep", () => {
     expect((await at("2026-08-14T11:39:00Z", "2026-08-14T12:26:00Z")).awaiting).toBe(0);
   });
 
-  it("keeps the rescue from lowering the bound past the branch-born suite", async () => {
-    // The rescue exists to lower a too-late bound with an earlier birth
-    // record — but on a fast-forwarded head the earlier records belong to
-    // the commit's previous life. Floored at the branch-born suite, the
-    // rescue can no longer revive the previous head's 👍 through the side
-    // door the confirm path just closed.
-    const fake = fakeFetch({
-      statuses: { abc1234: [gate("2026-08-14T12:00:00Z")] },
-      checkSuites: { abc1234: [
-        { created_at: "2026-08-14T11:50:00Z", head_branch: "stack/upper" },
-        { created_at: "2026-08-14T12:05:00Z", head_branch: "claude/topic" },
-      ] },
-      graphqlResponses: [repoPRs([prNode({
-        reactions: page([thumbs(undefined, "2026-08-14T11:59:00Z")]),
-      })])],
-    });
-    const out = await runFull(fake);
-    expect(out.awaiting).toBe(1);
-    // The head already carries `pending`; the point is that no success
-    // replaces it.
-    expect(out.written).toEqual([]);
-  });
-
-  it("dates the head by its check suites when no one writes statuses", async () => {
-    // A repo whose CI reports check runs, not commit statuses: with only
-    // our own writes on the head, the bound would rest on the very marker a
-    // delayed first sweep writes too late — the self-poisoning shape. Check
-    // suites are created at push, server-stamped, so a 👍 that beat our
-    // first write still approves.
-    const fake = fakeFetch({
-      statuses: { abc1234: [gate("2026-08-14T12:00:00Z")] },
-      checkSuites: { abc1234: [{ created_at: "2026-08-14T11:58:00Z", head_branch: "claude/topic" }] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs(undefined, "2026-08-14T11:59:00Z")]) })])],
-    });
-    const out = await runFull(fake);
-    expect(out.written[0].state).toBe("success");
-  });
-
   it("hears a nudge hidden behind a future-dated commit", async () => {
     // The commit date is author-controlled; forged past the owner's
     // "@codex review" it would filter the nudge out of the walk, and on an
@@ -1862,8 +1549,11 @@ describe("sweep", () => {
     const future = { nodes: [{ commit: { committedDate: "2026-08-14T13:00:00Z" } }] };
     const fake = fakeFetch({
       statuses: { abc1234: [gate()] },
-      issueComments: { 1: [{ user: { login: OWNER }, created_at: "2026-08-14T12:10:00Z", body: "@codex review" }] },
-      graphqlResponses: [repoPRs([prNode({ commits: future, reactions: page([thumbs()]) })])],
+      issueComments: { 1: [
+        codexSummary(),
+        { user: { login: OWNER }, created_at: "2026-08-14T12:10:00Z", body: "@codex review" },
+      ] },
+      graphqlResponses: [repoPRs([prNode({ commits: future })])],
     });
     const out = await runFull(fake);
     expect(out.awaiting).toBe(1);
@@ -1930,15 +1620,19 @@ describe("sweep", () => {
     expect(out.written).toEqual([]);
   });
 
-  it("keeps the clock running through a re-read of a head with findings", async () => {
+  it("parks a re-read of a head with findings until the table says it is done", async () => {
+    // Running outranks the old findings: the answer is being rewritten,
+    // and the table's edit to Completed is the wake.
     const fake = fakeFetch({
       statuses: { abc1234: [gate()] },
       prReviews: { 1: [review()] },
-      graphqlResponses: [repoPRs([
-        prNode({ reactions: page([hold("EYES", `${CODEX_BOT}[bot]`)]) }),
-      ])],
+      issueComments: { 1: [codexSummary({ status: "running", at: "2026-08-14T12:10:00Z" })] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
-    expect((await runFull(fake)).awaiting).toBe(1);
+    const out = await runFull(fake);
+    expect(out.awaiting).toBe(0);
+    // PENDING, not FINDINGS — the marker already says PENDING, so no write.
+    expect(out.written).toEqual([]);
   });
 
   it("holds on the owner's 👀 without keeping the fast clock running", async () => {
@@ -1957,7 +1651,7 @@ describe("sweep", () => {
   it("refuses two open PRs sharing a head, and asks nothing further", async () => {
     const fake = fakeFetch({
       graphqlResponses: [
-        repoPRs([prNode({ number: 1, reactions: page([thumbs()]) }), prNode({ number: 2 })]),
+        repoPRs([prNode({ number: 1 }), prNode({ number: 2 })]),
       ],
     });
     const out = await run(fake);
@@ -1968,13 +1662,13 @@ describe("sweep", () => {
 
   it("still judges PRs whose heads are distinct", async () => {
     const fake = fakeFetch({
-      // bbb has no marker yet, so its first gating is this sweep.
-      statuses: { aaa: [gate()] },
-      checkSuites: { aaa: [bornSuite()] },
+      // bbb1234 has no marker yet, so its first gating is this sweep.
+      statuses: { aaa1234: [gate()] },
+      issueComments: { 1: [codexSummary({ commit: "aaa1234" })] },
       graphqlResponses: [
         repoPRs([
-          prNode({ number: 1, headRefOid: "aaa", reactions: page([thumbs()]) }),
-          prNode({ number: 2, headRefOid: "bbb" }),
+          prNode({ number: 1, headRefOid: "aaa1234" }),
+          prNode({ number: 2, headRefOid: "bbb1234" }),
         ]),
       ],
     });
@@ -2046,7 +1740,8 @@ describe("sweep", () => {
     const runOnce = () => {
       const fake = fakeFetch({
         statuses: { abc1234: [gate()] },
-        graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+        issueComments: { 1: [codexSummary()] },
+        graphqlResponses: [repoPRs([prNode()])],
         failComments: true,
       });
       return { fake, run: sweep({ owner: OWNER, name: "r", token: "t", fetchImpl: fake.impl, log: () => {}, streaks }) };
@@ -2169,29 +1864,6 @@ describe("sweep", () => {
     expect(second.written.map((w) => w.state)).toEqual(["pending"]);
   });
 
-  it("keeps the rewound head's 👍 from approving a fast-forward return", async () => {
-    // Rewind to an ancestor (a force-push, leaving the event), earn a 👍
-    // there, fast-forward BACK to the original SHA: the return leaves no
-    // event, and the SHA's branch-born suite from its first tenure would
-    // date the arrival too early. Suites before the last force-push belong
-    // to a previous life, so the floor leaves only the re-arrival's fresh
-    // suite — which the rewound head's 👍 predates.
-    const fake = fakeFetch({
-      statuses: { abc1234: [{ context: "Vercel", state: "success", created_at: "2026-08-14T10:05:00Z" }] },
-      checkSuites: { abc1234: [
-        { created_at: "2026-08-14T10:00:00Z", head_branch: "claude/topic" },
-        { created_at: "2026-08-14T12:20:00Z", head_branch: "claude/topic" },
-      ] },
-      graphqlResponses: [repoPRs([prNode({
-        forcePushes: { nodes: [{ createdAt: "2026-08-14T12:00:00Z" }] },
-        reactions: page([thumbs(undefined, "2026-08-14T12:10:00Z")]),
-      })])],
-    });
-    const out = await runFull(fake);
-    expect(out.awaiting).toBe(1);
-    expect(out.written[0].state).toBe("pending");
-  });
-
   it("publishes wording that names the failure and its remedy", () => {
     // Every other test here compares production output back to the constant
     // it imported, which proves the code writes the marker but says nothing
@@ -2210,30 +1882,6 @@ describe("sweep", () => {
     // description at 140 characters, and a truncated instruction is a
     // broken one.
     expect(UNANSWERED.length).toBeLessThan(141);
-  });
-
-  it("publishes a fork remedy that a fork maintainer can actually take", () => {
-    // Same reasoning, and it matters more here: this wording exists
-    // precisely because the other one names an impossible action on a fork
-    // head, so a reword that lost the remedy would restore the bug it was
-    // added to fix.
-    expect(UNANSWERED_FORK).toBe(
-      "A fork head\u0027s 👍 cannot be accepted — comment @codex review, or merge by admin override",
-    );
-    // It keeps the ordinary remedy, which the first version of this wording
-    // wrongly dropped (Codex, PR #37): only the REACTION channel is closed
-    // on a fork. `cleanlyApproved` is `approvedIsLatest || cleanIsLatest`,
-    // and `cleanIsLatest` never consults `checkSuiteBirths` — so a clean
-    // comment naming this SHA approves a fork head exactly as it would any
-    // other, and a re-review can genuinely settle it.
-    expect(UNANSWERED_FORK).toContain("@codex review");
-    // ...and it keeps the fallback for when Codex answers with the 👍 alone,
-    // which is the case that cannot be accepted here.
-    expect(UNANSWERED_FORK).toContain("admin override");
-    // The claim it must NOT make is the absolute one: an over-claim here
-    // sends a maintainer to an admin override past a remedy that works.
-    expect(UNANSWERED_FORK).not.toMatch(/cannot approve/);
-    expect(UNANSWERED_FORK.length).toBeLessThan(141);
   });
 
   it("parks an unanswered head after UNANSWERED_MINUTES", async () => {
@@ -2266,14 +1914,9 @@ describe("sweep", () => {
     ]);
   });
 
-  it("tells a fork head the remedy that actually works", async () => {
-    // Codex, PR #37. A fork head is undatable forever -- GitHub reports no
-    // `head_branch` for its suites -- so `judge` refuses its 👍 by design,
-    // and the ordinary marker would tell the maintainer to ask for a review
-    // whose clean answer is rejected identically. Publishing an instruction
-    // that provably cannot work is worse than the silence this change
-    // replaced, so the fork case names the remedy the code already
-    // documents: an admin override, or a re-push to a branch in this repo.
+  it("tells a fork head the same remedy as any other", async () => {
+    // A fork head's verdict names its commit like any other, so a
+    // re-review settles it and the one remedy holds.
     const parked = await sweep({
       owner: OWNER, name: "r", token: "t",
       fetchImpl: fakeFetch({
@@ -2284,61 +1927,24 @@ describe("sweep", () => {
     });
     expect(parked.awaiting).toBe(0);
     expect(parked.written).toEqual([
-      { number: 1, state: "pending", description: UNANSWERED_FORK },
+      { number: 1, state: "pending", description: UNANSWERED },
     ]);
   });
 
-  it("says the fork remedy exactly once, like any other marker", async () => {
-    // The stickiness reads the marker back off the head, so it has to
-    // recognize BOTH wordings -- a fork head that re-escalated every sweep
-    // would walk its gate marker forward exactly as the same-repo one would.
-    const parked = await sweep({
-      owner: OWNER, name: "r", token: "t",
-      fetchImpl: fakeFetch({
-        statuses: { abc1234: [
-          gate("2026-08-14T12:30:00Z", "pending", UNANSWERED_FORK),
-          gate("2026-08-14T11:00:00Z"),
-        ] },
-        graphqlResponses: [repoPRs([prNode({ isCrossRepository: true })])],
-      }).impl,
-      log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
-    });
-    expect(parked.awaiting).toBe(0);
-    expect(parked.written).toEqual([]);
-  });
-
-  it("re-words an inherited marker for the head it is now on", async () => {
-    // Codex, PR #37. Making the ESCALATION topology-aware was half the job:
-    // the sticky read replayed whatever the commit already wore, so a SHA
-    // parked in a same-repo pull request and later reused as a fork head
-    // kept advertising `@codex review` -- the instruction that provably
-    // cannot work there, arriving by inheritance instead of by escalation.
-    // The marker is a function of the head's topology, never of what a
-    // previous life wrote, so it is recomputed rather than replayed.
+  it("replaces a legacy fork marker a commit still wears", async () => {
+    // Not replayed: the wording an earlier version wrote on fork heads is
+    // replaced by an ordinary PENDING, which starts the head a fresh window.
     const asFork = await sweep({
       owner: OWNER, name: "r", token: "t",
       fetchImpl: fakeFetch({
-        statuses: { abc1234: [gate("2026-08-14T11:00:00Z", "pending", UNANSWERED)] },
+        statuses: { abc1234: [gate("2026-08-14T11:00:00Z", "pending", LEGACY_FORK_MARKER)] },
         graphqlResponses: [repoPRs([prNode({ isCrossRepository: true })])],
       }).impl,
       log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
     });
+    expect(asFork.awaiting).toBe(1);
     expect(asFork.written).toEqual([
-      { number: 1, state: "pending", description: UNANSWERED_FORK },
-    ]);
-    // And the other direction: the owner re-pushes a fork contribution to a
-    // branch here, so `@codex review` starts working and the admin-override
-    // wording stops being the remedy.
-    const asOwn = await sweep({
-      owner: OWNER, name: "r", token: "t",
-      fetchImpl: fakeFetch({
-        statuses: { abc1234: [gate("2026-08-14T11:00:00Z", "pending", UNANSWERED_FORK)] },
-        graphqlResponses: [repoPRs([prNode()])],
-      }).impl,
-      log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
-    });
-    expect(asOwn.written).toEqual([
-      { number: 1, state: "pending", description: UNANSWERED },
+      { number: 1, state: "pending", description: PENDING },
     ]);
   });
 
@@ -2353,7 +1959,7 @@ describe("sweep", () => {
     const moved = await sweep({
       owner: OWNER, name: "r", token: "t",
       fetchImpl: fakeFetch({
-        statuses: { abc1234: [gate("2026-08-14T11:00:00Z", "pending", UNANSWERED_FORK)] },
+        statuses: { abc1234: [gate("2026-08-14T11:00:00Z", "pending", LEGACY_FORK_MARKER)] },
         graphqlResponses: [repoPRs([prNode({
           isCrossRepository: true,
           forcePushes: { nodes: [{ createdAt: "2026-08-14T12:30:00Z" }] },
@@ -2472,12 +2078,9 @@ describe("sweep", () => {
   });
 
   it("clears only the inherited marker, never a finding", async () => {
-    // The clear is guarded on the wording for a reason: a comment-only
-    // finding reaches this path too (the FINDINGS fast-exit needs
-    // `reviewedAt`, which a bare comment has none of), and a fresh branch
-    // suite would then rewrite its accurate FINDINGS to PENDING -- reopening
-    // the gate's wording on a head Codex has actually answered. Only the
-    // marker this loop wrote itself is safe to take back.
+    // A fresh branch suite must not rewrite an accurate FINDINGS to PENDING
+    // -- reopening the gate's wording on a head Codex has actually
+    // answered. Only the marker this loop wrote itself is safe to take back.
     const kept = await sweep({
       owner: OWNER, name: "r", token: "t",
       fetchImpl: fakeFetch({
@@ -2488,7 +2091,7 @@ describe("sweep", () => {
       }).impl,
       log: () => {}, now: () => Date.parse("2026-08-14T12:31:00Z"),
     });
-    expect(kept.awaiting).toBe(1);
+    expect(kept.awaiting).toBe(0);
     expect(kept.written).toEqual([]);
   });
 
@@ -2559,10 +2162,9 @@ describe("sweep", () => {
     expect(parked.written).toEqual([]);
   });
 
-  it("keeps a reading head on the clock past the window", async () => {
-    // 👀 means the review genuinely started; the swap to 👍 emits no
-    // webhook, so a parked reading head would strand the verdict on the
-    // hourly schedule at the exact moment the next minute matters.
+  it("parks a head past the window whatever Codex's 👀 says", async () => {
+    // A 👀 names no review, so it does not keep the clock: a review that is
+    // genuinely running says so in the table, whose edit is the wake.
     const fake = fakeFetch({
       statuses: { abc1234: [gate("2026-08-14T12:00:00Z")] },
       graphqlResponses: [repoPRs([prNode({
@@ -2573,7 +2175,8 @@ describe("sweep", () => {
       owner: OWNER, name: "r", token: "t", fetchImpl: fake.impl,
       log: () => {}, now: () => Date.parse("2026-08-14T12:45:00Z"),
     });
-    expect(out.awaiting).toBe(1);
+    expect(out.awaiting).toBe(0);
+    expect(out.written).toEqual([{ number: 1, state: "pending", description: UNANSWERED }]);
   });
 
   it("parks a nudged head UNANSWERED_MINUTES after the ask", async () => {
@@ -2733,7 +2336,8 @@ const CODE_FINDING = "**P1 Badge Handle the empty case**\n\nUseful? React with �
 const approvedWith = (threads, over = {}) => fakeFetch({
   statuses: { abc1234: [gate()] },
   checkSuites: { abc1234: [bornSuite()] },
-  graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+  issueComments: { 1: [codexSummary()] },
+  graphqlResponses: [repoPRs([prNode()])],
   reviewThreads: { 1: threads },
   ...over,
 });
@@ -2879,13 +2483,12 @@ describe("sweep, when a collaborator asks for a re-review", () => {
   });
 
   it("does not hold an approved head", async () => {
-    // Only the owner's nudge closes the gate over a standing 👍; anyone
-    // else's would be a merge block for whoever can comment.
+    // Only the owner's nudge closes the gate over a standing verdict;
+    // anyone else's would be a merge block for whoever can comment.
     const fake = fakeFetch({
       statuses: { abc1234: [gate()] },
-      checkSuites: { abc1234: [bornSuite()] },
-      issueComments: { 1: [ask("2026-08-14T12:10:00Z")] },
-      graphqlResponses: [repoPRs([prNode({ reactions: page([thumbs()]) })])],
+      issueComments: { 1: [codexSummary(), ask("2026-08-14T12:10:00Z")] },
+      graphqlResponses: [repoPRs([prNode()])],
     });
     expect((await run(fake))[0].state).toBe("success");
   });
@@ -3636,6 +3239,76 @@ describe("input", () => {
     // under the old code and the loop bug looked like a scheduling problem.
     expect(withEnv({ INPUT_REPOSITORY: "owner/name" },
       () => input("repository", "GITHUB_REPOSITORY"))).toBe("owner/name");
+  });
+});
+
+describe("reviewState", () => {
+  it("reads the machine-readable state Codex keeps beside the table", () => {
+    expect(reviewState(codexTable({ commit: "abc1234" })).code_review).toEqual({
+      commit_sha: "abc1234", has_any_findings: false, status: "completed",
+    });
+  });
+
+  it("reads nothing where there is no state, or it does not parse", () => {
+    expect(reviewState(summaryTable({ status: "Running", commit: "abc1234" }))).toBeNull();
+    expect(reviewState("<!-- codex-review-state:v1 {not json} -->")).toBeNull();
+    expect(reviewState(null)).toBeNull();
+  });
+});
+
+describe("reviewTableRow", () => {
+  const HEAD = "b9f8d3213f5895509362ccd581b990bd0d830d3b";
+
+  it("reads a row's status and the time it carries", () => {
+    expect(reviewTableRow(codexTable({ commit: "b9f8d32", at: "2026-10-20T09:30:35.230334Z" }), HEAD))
+      .toEqual({ status: "completed", at: "2026-10-20T09:30:35.230334Z" });
+  });
+
+  it("tells a row about another commit from one about this head it can't read", () => {
+    const other = summaryTable({ status: "Completed", commit: "b9f8d32", security: "Queued", securityCommit: "0beef12" });
+    expect(reviewTableRow(other, HEAD, "Security Review")).toBeNull();
+    const mine = summaryTable({ status: "Completed", commit: "b9f8d32", security: "Queued", securityCommit: "b9f8d32" });
+    expect(reviewTableRow(mine, HEAD, "Security Review").status).toBeNull();
+  });
+});
+
+describe("codexCodeReview", () => {
+  const HEAD = "abc1234";
+  const api = (comments) => ({ rest: async () => comments });
+  const read = (comments, log) => codexCodeReview(api(comments), { owner: OWNER, name: "r", number: 1, head: HEAD, log });
+
+  it("reads Codex's state for this exact commit, timed by its row", async () => {
+    expect(await read([codexSummary()])).toEqual({ status: "completed", findings: false, at: AFTER });
+    expect(await read([codexSummary({ findings: true })])).toEqual({ status: "completed", findings: true, at: AFTER });
+  });
+
+  it("says nothing about another commit", async () => {
+    expect(await read([codexSummary({ commit: "0beef12" })])).toBeNull();
+  });
+
+  it("reads neither status where the row disagrees with the state", async () => {
+    // Completed state, running row: no time, so nothing approves on it.
+    const finished = codexTable().replace("**Completed**", "**Running**");
+    expect(await read([{ ...codexSummary(), body: finished }]))
+      .toEqual({ status: null, findings: false, at: null });
+    // Running state, completed row: not "running" either, or the sweep
+    // would park on a review that has finished.
+    const running = codexTable({ status: "running" }).replace("**Running**", "**Completed**");
+    expect(await read([{ ...codexSummary(), body: running }]))
+      .toEqual({ status: null, findings: null, at: null });
+  });
+
+  it("reads a table with no state as running or not, never as clean", async () => {
+    const body = summaryTable({ status: "Completed", commit: HEAD });
+    expect((await read([{ user: { login: `${CODEX_BOT}[bot]` }, body }])).findings).toBeNull();
+  });
+
+  it("ignores a table that is not Codex's, and says so when its state does not parse", async () => {
+    expect(await read([{ ...codexSummary(), user: { login: CODEX_BOT, type: "User" } }])).toBeNull();
+    const lines = [];
+    const garbled = "<!-- codex-pull-request-review-summary -->\n<!-- codex-review-state:v1 {nope} -->";
+    expect(await read([{ user: { login: `${CODEX_BOT}[bot]` }, body: garbled }], (l) => lines.push(l))).toBeNull();
+    expect(lines.some((l) => l.includes("did not parse"))).toBe(true);
   });
 });
 
