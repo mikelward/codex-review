@@ -1,7 +1,7 @@
 ---
 trigger: always_on
 alwaysApply: true
-last_modified: 2026-10-22
+last_modified: 2026-10-23
 ---
 
 # AGENTS.md
@@ -209,8 +209,12 @@ trim rather than append; delete one that has stopped biting.
 
 ## Commit messages
 
-- A clear, plain-English subject in sentence case, ≤ ~70 chars with its
-  prefix; mechanism and file:line detail in the body, after a blank line.
+- **Title like a changelog line** (maintainer, 2026-10-23): after any prefix, an
+  imperative verb, then the change as a consumer sees it, plain English,
+  sentence case, ≤ ~70 chars with its prefix, e.g. `Fix …` for what was broken,
+  `Improve …` for what got better, `Add …` for what's new; an optional
+  parenthetical says how. Never the scenario or the mechanism: those, and
+  file:line, go in the body, after a blank line. Pull request titles match.
 - **Prefix a subject that does not change what the action does**; a bare
   subject means a consumer could notice the difference.
 
