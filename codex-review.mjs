@@ -540,10 +540,13 @@ export function reviewState(body) {
 export function reviewTableRow(body, head, kind = "Code Review") {
   const text = String(body ?? "");
   if (!text.includes(SUMMARY_MARKER)) return null;
-  // Everything from `<details` on is Codex's boilerplate footer, dropped
-  // before the shape is read -- as in `cleanVerdict`, and for the same
-  // reason: the footer's prose is not part of what is being validated.
-  const rows = text.split(/<details/i)[0]
+  // Codex's "About Codex in GitHub" footer is dropped before the shape is
+  // read: its prose is not part of what is being validated. Cut at THAT
+  // `<details>`, not the first one: since about 2026-11 Codex wraps the
+  // whole summary, table and all, in a `<details>` of its own, and cutting
+  // at the first left no rows, so a clean pass never approved and every
+  // head waited for a nudge.
+  const rows = text.split(SUMMARY_FOOTER)[0]
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.startsWith("|"));
@@ -566,6 +569,14 @@ export function reviewTableRow(body, head, kind = "Code Review") {
   }
   return null;
 }
+
+/**
+ * Where Codex's boilerplate footer starts in its status-table comment: the
+ * collapsible "About Codex in GitHub" section. Matched by its summary, since
+ * the table itself may sit inside another `<details>` (see
+ * `reviewTableRow`).
+ */
+const SUMMARY_FOOTER = /<details>\s*<summary>[^<]*About Codex in GitHub/i;
 
 /** The status of this head's CODE review row: see `reviewTableRow`. */
 export function reviewTableStatus(body, head) {

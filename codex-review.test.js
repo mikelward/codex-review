@@ -3290,6 +3290,64 @@ describe("reviewTableRow", () => {
   });
 });
 
+// Codex's summary comment as it reads since about 2026-11: the whole summary,
+// table included, inside a `<details>` of its own, with the "About Codex"
+// footer nested at its end.
+const wrappedTable = ({ commit, status = "completed", findings = false, at = AFTER }) => {
+  const word = { completed: "Completed", running: "Running" }[status];
+  const state = {
+    code_review: {
+      commit_sha: commit,
+      has_any_findings: status === "completed" ? findings : null,
+      has_unresolved_findings: status === "completed" ? findings : null,
+      status,
+    },
+    security_review: { commit_sha: commit, has_any_findings: null, has_unresolved_findings: null, status: "completed" },
+  };
+  return [
+    "<!-- codex-pull-request-review-summary -->",
+    `<!-- codex-review-state:v1 ${JSON.stringify(state)} -->`,
+    `<!-- codex-security-review:v1 {"blockingSeverityThreshold":"P0","headSha":"${commit}","status":"completed"} -->`,
+    "<details>",
+    `<summary><strong>Codex Review Summary</strong>: ✅ ${word}</summary>`,
+    "",
+    "This comment shows the latest Codex review activity on this pull request.",
+    "",
+    "| Review | Status | Commit | Review trigger |",
+    "| --- | --- | --- | --- |",
+    `| 📝 **Code Review** | ✅ **${word}** <relative-time datetime="${at}">${at}</relative-time> | \`${commit.slice(0, 7)}\` | PR opened |`,
+    `| 🔒 **Security Review** | ✅ **Completed** <relative-time datetime="${BEFORE}">${BEFORE}</relative-time> | \`${commit.slice(0, 7)}\` | PR opened |`,
+    "",
+    "",
+    "",
+    "<details> <summary>ℹ️ About Codex in GitHub</summary>",
+    "<br/>",
+    "",
+    "Reviews are triggered when you",
+    "- Open a pull request for review",
+    "",
+    "</details>",
+    "",
+    "</details>",
+  ].join("\n");
+};
+
+describe("a summary wrapped in its own <details>", () => {
+  const HEAD = "01b79c153c89b847f60de283f031aafcbc0d1ae4";
+
+  it("still reads the table's rows", () => {
+    expect(reviewTableRow(wrappedTable({ commit: HEAD }), HEAD)).toEqual({ status: "completed", at: AFTER });
+    expect(reviewTableRow(wrappedTable({ commit: HEAD, status: "running" }), HEAD).status).toBe("running");
+  });
+
+  it("is a clean pass when the state says nothing is open, and findings when it says otherwise", async () => {
+    const comment = (over) => ({ user: { login: `${CODEX_BOT}[bot]`, type: "Bot" }, created_at: BEFORE, updated_at: AFTER, body: wrappedTable({ commit: HEAD, ...over }) });
+    const read = (c) => codexCodeReview({ rest: async () => [c] }, { owner: OWNER, name: "r", number: 1, head: HEAD });
+    expect(await read(comment({}))).toEqual({ status: "completed", findings: false, at: AFTER });
+    expect(await read(comment({ findings: true }))).toEqual({ status: "completed", findings: true, at: AFTER });
+  });
+});
+
 describe("codexCodeReview", () => {
   const HEAD = "abc1234";
   const api = (comments) => ({ rest: async () => comments });
