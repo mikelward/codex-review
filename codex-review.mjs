@@ -596,7 +596,8 @@ export function reviewTableStatus(body, head) {
  *   commit. Not `has_any_findings`, which counts every finding the pull
  *   request ever drew, so a thread answered and resolved would hold every
  *   later head forever. A state without the field falls back to
- *   `has_any_findings`. Anything but `false` is not clean.
+ *   `has_any_findings`. Only `false` is clean and only `true` is findings;
+ *   null (both fields unset) is no verdict and counts for nothing.
  * - `at` is when that row says it completed (or started), the time a clean
  *   answer is ordered by against findings and nudges.
  *
@@ -1716,7 +1717,12 @@ export async function sweep({
       const current = (t) => t !== null && (retargetedAt === null || t > retargetedAt);
       const done = code?.status === "completed" && current(code.at);
       const tableCleanAt = done && code.findings === false ? code.at : null;
-      const tableFindingsAt = done && code.findings !== false ? code.at : null;
+      // Only `true` is findings. A manual re-review can finish with both
+      // fields null a second AFTER its clean comment; counting that null as
+      // findings made it outrank the clean word and held FINDINGS forever.
+      // A table with no verdict is no word at all: it neither approves,
+      // blocks, nor answers a nudge, so the head waits for a verdict.
+      const tableFindingsAt = done && code.findings === true ? code.at : null;
       // Every channel Codex answers on, each tied to this commit: the
       // table names it, a review carries its id, a clean comment names it,
       // and a findings comment is bounded by the walk above.
