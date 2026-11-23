@@ -1161,6 +1161,82 @@ describe("sweep", () => {
     expect(out.awaiting).toBe(0);
   });
 
+  it("approves a clean comment followed by a table with no verdict", async () => {
+    // travelmo#96: on a manual re-review Codex posted its clean comment, then
+    // a second later marked the table Completed with both findings fields
+    // null. Counting that null as findings outranked the clean comment and
+    // held FINDINGS on a head nothing was found on.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [
+          {
+            user: { login: `${CODEX_BOT}[bot]` },
+            created_at: "2026-08-14T12:10:00Z",
+            body: "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `abc1234`",
+          },
+          codexSummary({ findings: null, anyFindings: null, at: "2026-08-14T12:10:01Z" }),
+        ],
+      },
+      graphqlResponses: [repoPRs([prNode()])],
+    });
+    const out = await runFull(fake);
+    expect(out.written[0].state).toBe("success");
+  });
+
+  it("keeps waiting when a table with no verdict is Codex's only word", async () => {
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: { 1: [codexSummary({ findings: null, anyFindings: null, at: "2026-08-14T12:10:01Z" })] },
+      graphqlResponses: [repoPRs([prNode()])],
+    });
+    const out = await runFull(fake);
+    expect(out.awaiting).toBe(1);
+    expect(out.written.map((w) => w.state).includes("success")).toBe(false);
+  });
+
+  it("keeps an owner's re-review open when the next table has no verdict", async () => {
+    // Clean, then the owner asks again, then a table with no verdict: the
+    // ask is unanswered, so the earlier clean word must not approve.
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [
+          {
+            user: { login: `${CODEX_BOT}[bot]` },
+            created_at: "2026-08-14T12:06:00Z",
+            body: "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `abc1234`",
+          },
+          { user: { login: OWNER }, created_at: "2026-08-14T12:08:00Z", body: "@codex review" },
+          codexSummary({ findings: null, anyFindings: null, at: "2026-08-14T12:10:01Z" }),
+        ],
+      },
+      graphqlResponses: [repoPRs([prNode()])],
+    });
+    const out = await runFull(fake);
+    expect(out.written.map((w) => w.state).includes("success")).toBe(false);
+    expect(out.awaiting).toBe(1);
+  });
+
+  it("still blocks a clean comment followed by a table with findings", async () => {
+    const fake = fakeFetch({
+      statuses: { abc1234: [gate()] },
+      issueComments: {
+        1: [
+          {
+            user: { login: `${CODEX_BOT}[bot]` },
+            created_at: "2026-08-14T12:10:00Z",
+            body: "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `abc1234`",
+          },
+          codexSummary({ findings: true, at: "2026-08-14T12:10:01Z" }),
+        ],
+      },
+      graphqlResponses: [repoPRs([prNode()])],
+    });
+    const out = await runFull(fake);
+    expect(out.written[0].description).toBe(FINDINGS);
+  });
+
   it("stops approving when findings land after the clean comment", async () => {
     // A clean comment then a findings pass on the SAME head -- an owner
     // nudge is the ordinary route. The reaction may outrank findings
